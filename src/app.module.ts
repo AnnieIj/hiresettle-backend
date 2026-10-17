@@ -44,6 +44,11 @@ import { MaintenanceModeModule } from './common/maintenance/maintenance-mode.mod
 import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
 import { DevModule } from './modules/dev/dev.module';
 
+export function shouldSkipThrottle(req: { path?: string; url?: string; originalUrl?: string }): boolean {
+  const path = req.path ?? req.originalUrl?.split('?')[0] ?? req.url?.split('?')[0] ?? '';
+  return path === '/health' || path === '/status';
+}
+
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [stellarConfig] }),
@@ -52,7 +57,7 @@ import { DevModule } from './modules/dev/dev.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         throttlers: [{ ttl: config.get<number>('THROTTLE_TTL', 60), limit: config.get<number>('THROTTLE_LIMIT', 100) }],
-        skipIf: (context) => context.switchToHttp().getRequest().url === '/health',
+        skipIf: (context) => shouldSkipThrottle(context.switchToHttp().getRequest()),
       }),
     }),
     ScheduleModule.forRoot(),
