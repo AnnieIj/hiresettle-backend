@@ -65,6 +65,7 @@ enum NotificationType {
   DISPUTE_SLA_OVERDUE
   DISPUTE_APPEALED
   DISPUTE_APPEAL_DECIDED
+  DISPUTE_EVIDENCE_WINDOW_CLOSING
   COMMENT_ADDED
   WATCHER_ADDED
   UNMATCHED_PAYMENT_ALERT
@@ -223,6 +224,7 @@ model User {
   recoveryCodes        RecoveryCode[]
   trustedDevices       TrustedDevice[]
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
+  arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
 
   @@index([role, deactivatedAt])
@@ -1010,6 +1012,8 @@ model Dispute {
   fundsLocked             Boolean          @default(true)
   fundsReleasedAt         DateTime?
   isFinal                 Boolean          @default(false)
+  evidenceDeadline        DateTime?        // deadline for either party to upload evidence (#499)
+  evidenceDeadlineWarnedAt DateTime?       // set once both parties were warned the evidence window is closing
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
@@ -1023,7 +1027,25 @@ model Dispute {
   @@index([arbiterId, status])
   @@index([status, slaStatus, responseDeadline])
   @@index([status, appealDeadline])
+  @@index([status, evidenceDeadline])
   @@map("disputes")
+}
+
+// Records the arbiter fee deducted on dispute resolution (#500). One row per
+// settled dispute; the fee is held back from the amount released on-chain.
+model ArbiterPayout {
+  id         String   @id @default(uuid())
+  disputeId  String   @unique
+  arbiterId  String
+  feeType    String   // "FLAT" or "PERCENT", snapshot of config at resolution time
+  feeValue   Decimal  // snapshot of the configured flat amount or percent
+  amount     BigInt   // computed payout amount, in stroops
+  createdAt  DateTime @default(now())
+
+  arbiter User @relation(fields: [arbiterId], references: [id])
+
+  @@index([arbiterId])
+  @@map("arbiter_payouts")
 }
 
 // At most one appeal per dispute — enforced by @unique on disputeId (#382).
