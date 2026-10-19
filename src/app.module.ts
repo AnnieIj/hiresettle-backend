@@ -41,6 +41,7 @@ import { CompaniesModule } from './modules/companies/companies.module';
 import { GraphqlModule } from './graphql/graphql.module';
 import stellarConfig from './config/stellar.config';
 import { MaintenanceModeModule } from './common/maintenance/maintenance-mode.module';
+import { SystemConfigModule } from './common/system-config/system-config.module';
 import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
 import { DevModule } from './modules/dev/dev.module';
 
@@ -72,6 +73,7 @@ import { DevModule } from './modules/dev/dev.module';
     DataRetentionModule,
 
     PrismaModule,
+    SystemConfigModule,
     S3Module,
     PasswordPolicyModule,
     HibpModule,

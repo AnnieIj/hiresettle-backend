@@ -3,7 +3,9 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { ConfigService } from '@nestjs/config';
 import {
   Dispute,
@@ -40,7 +42,7 @@ export interface DisputeActor {
  */
 @Injectable()
 export class DisputesService {
-  private readonly appealWindowHours: number;
+  private readonly envAppealWindowHours: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -49,8 +51,16 @@ export class DisputesService {
     private readonly config: ConfigService,
     private readonly arbiters: ArbiterAssignmentService,
     private readonly sla: DisputeSlaService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
-    this.appealWindowHours = Number(this.config.get('DISPUTE_APPEAL_WINDOW_HOURS', 72));
+    this.envAppealWindowHours = Number(this.config.get('DISPUTE_APPEAL_WINDOW_HOURS', 72));
+  }
+
+  /** Appeal window; admin overrides apply without a restart (#503). */
+  private get appealWindowHours(): number {
+    return this.systemConfig
+      ? this.systemConfig.getNumber('disputes.appealWindowHours')
+      : this.envAppealWindowHours;
   }
 
   // ----------------------------------------------------------

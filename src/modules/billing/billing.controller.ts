@@ -71,10 +71,16 @@ export class BillingController {
     required: false,
     description: "End date (ISO format)",
   })
+  @ApiQuery({
+    name: "fiat",
+    required: false,
+    description: "3-letter ISO 4217 currency for fiat-equivalent totals (e.g. USD). Omit for token amounts only.",
+  })
   getBillingSummary(
     @CurrentUser() user: any,
     @Query("from") from?: string,
     @Query("to") to?: string,
+    @Query("fiat") fiat?: string,
   ) {
     const fromDate = from ? new Date(from) : undefined;
     const toDate = to ? new Date(to) : undefined;
@@ -97,11 +103,17 @@ export class BillingController {
     required: false,
     description: "End date (ISO format)",
   })
+  @ApiQuery({
+    name: "fiat",
+    required: false,
+    description: "3-letter ISO 4217 currency to include fiat-equivalent columns (e.g. USD)",
+  })
   async exportBillingCsv(
     @CurrentUser() user: any,
     @Res() res: Response,
     @Query("from") from?: string,
     @Query("to") to?: string,
+    @Query("fiat") fiat?: string,
   ) {
     const fromDate = from ? new Date(from) : undefined;
     const toDate = to ? new Date(to) : undefined;
@@ -109,6 +121,7 @@ export class BillingController {
       user,
       fromDate,
       toDate,
+      parseFiat(fiat),
     );
 
     res.setHeader("Content-Type", "text/csv");
@@ -287,4 +300,16 @@ export class BillingExportController {
   getUsage(@CurrentUser("companyId") companyId: string) {
     return this.billingService.getCompanyUsage(companyId || "unknown");
   }
+}
+
+/** Validate and normalize an optional fiat currency query param. */
+function parseFiat(fiat?: string): string | undefined {
+  if (!fiat) return undefined;
+  const normalized = fiat.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(normalized)) {
+    throw new BadRequestException(
+      "fiat must be a 3-letter ISO 4217 currency code (e.g. USD)",
+    );
+  }
+  return normalized;
 }

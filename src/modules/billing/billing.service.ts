@@ -1,6 +1,14 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { User, UserRole } from "@prisma/client";
+import { StellarService } from "../../common/stellar/stellar.service";
+import { ExchangeRateService } from "../../common/exchange-rates/exchange-rate.service";
+import { CreditLedgerService } from "./credit-ledger.service";
+
+/** Round a fiat amount to 2 decimal places. */
+function roundFiat(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 /** Escape a value for safe inclusion in a CSV cell. */
 function csvCell(value: string | number | null | undefined): string {
@@ -26,6 +34,7 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly exchangeRates: ExchangeRateService,
+    private readonly credits: CreditLedgerService,
   ) {}
 
   private static createPdfBuffer(lines: string[]) {
@@ -102,7 +111,7 @@ export class BillingService {
         `BT /F1 12 Tf 72 120 Td (Total Escrowed: ${summary.totalEscrowed}) Tj ET`,
         `BT /F1 12 Tf 72 104 Td (Total Released: ${summary.totalReleased}) Tj ET`,
       ];
-      return this.createPdfBuffer(lines);
+      return BillingService.createPdfBuffer(lines);
     });
   }
 
@@ -129,27 +138,56 @@ export class BillingService {
     };
   }
 
-  chargePlatformFee(
+  /**
+   * Charge a platform fee (minor units). Prepaid credits are applied first
+   * (#507); only the uncovered remainder goes to the external payment
+   * method. `feeReference` makes the credit deduction idempotent, so a
+   * retried charge never consumes credit twice.
+   */
+  async chargePlatformFee(
     companyId: string,
     amount: number | bigint,
     paymentMethod = "saved_method",
+    feeReference = `fee_${Date.now()}`,
   ) {
-    const numericAmount = typeof amount === "bigint" ? Number(amount) : amount;
-    const status =
-      Number.isFinite(numericAmount) && numericAmount > 0
-        ? "succeeded"
-        : "failed";
+    const feeAmount = toMinorUnits(amount);
+    if (feeAmount <= 0n) {
+      return {
+        companyId,
+        paymentMethod,
+        amount: feeAmount.toString(),
+        creditApplied: "0",
+        amountCharged: "0",
+        creditBalance: (await this.credits.getBalance(companyId)).toString(),
+        status: "failed" as const,
+        chargeId: null,
+        retryable: true,
+      };
+    }
+
+    const credit = await this.credits.applyToFee(companyId, feeAmount, feeReference);
+    // Fully covered by credit: nothing is sent to the payment processor.
+    const chargeId = credit.amountDue > 0n ? `ch_${Date.now()}` : null;
+
     return {
       companyId,
-      paymentMethod,
-      amount: String(numericAmount),
-      status,
-      chargeId: `ch_${Date.now()}`,
-      retryable: status === "failed",
+      paymentMethod: credit.amountDue > 0n ? paymentMethod : "prepaid_credit",
+      amount: feeAmount.toString(),
+      creditApplied: credit.creditApplied.toString(),
+      amountCharged: credit.amountDue.toString(),
+      creditBalance: credit.balanceAfter.toString(),
+      status: "succeeded" as const,
+      chargeId,
+      retryable: false,
     };
   }
 
-  async getBillingSummary(companyUser: User, fromDate?: Date, toDate?: Date) {
+  async getBillingSummary(
+    companyUser: User,
+    fromDate?: Date,
+    toDate?: Date,
+    fiat?: string,
+  ) {
     // Get current calendar month if no dates provided
     const now = new Date();
     const startDate =
@@ -233,21 +271,60 @@ export class BillingService {
     };
   }
 
-  async exportBillingToCsv(companyUser: User, fromDate?: Date, toDate?: Date) {
+  private async toFiatValues(
+    tokenAddress: string,
+    escrowed: bigint,
+    released: bigint,
+    fiat: string,
+  ): Promise<{ escrowedFiat: number | null; releasedFiat: number | null; tokenSymbol: string | null }> {
+    try {
+      const token = this.stellar.getTokenConfig(tokenAddress);
+      const rate = await this.exchangeRates.getRate(token.symbol, fiat);
+      if (rate == null) {
+        return { escrowedFiat: null, releasedFiat: null, tokenSymbol: token.symbol };
+      }
+
+      const escrowedHuman = parseFloat(this.stellar.stroopsToHuman(escrowed, tokenAddress));
+      const releasedHuman = parseFloat(this.stellar.stroopsToHuman(released, tokenAddress));
+      return {
+        escrowedFiat: roundFiat(escrowedHuman * rate),
+        releasedFiat: roundFiat(releasedHuman * rate),
+        tokenSymbol: token.symbol,
+      };
+    } catch (error: any) {
+      this.logger.warn(
+        `Fiat conversion skipped for token ${tokenAddress}: ${error?.message ?? String(error)}`,
+      );
+      return { escrowedFiat: null, releasedFiat: null, tokenSymbol: null };
+    }
+  }
+
+  async exportBillingToCsv(
+    companyUser: User,
+    fromDate?: Date,
+    toDate?: Date,
+    fiat?: string,
+  ) {
     const billingData = await this.getBillingSummary(
       companyUser,
       fromDate,
       toDate,
+      fiat,
     );
+    const fiatCurrency = billingData.fiat;
 
-    // Build CSV header
+    // Build CSV header — fiat columns only when a fiat currency is requested.
     const headers = [
       "Engagement ID",
       "Job Title",
       "Created At",
+      "Token",
       "Total Escrowed",
       "Total Released",
       "Status",
+      ...(fiatCurrency
+        ? [`Total Escrowed (${fiatCurrency})`, `Total Released (${fiatCurrency})`]
+        : []),
     ];
 
     // Build CSV rows
@@ -267,6 +344,7 @@ export class BillingService {
     // Add summary row
     const summaryRow = [
       "Summary",
+      "",
       "",
       "",
       billingData.summary.totalEscrowed,
@@ -342,4 +420,13 @@ export class BillingService {
 
     return [CSV_HEADER, ...rows].join("\n");
   }
+}
+
+/** Fees are integer minor units; reject fractional or non-finite numbers. */
+function toMinorUnits(amount: number | bigint): bigint {
+  if (typeof amount === "bigint") return amount;
+  if (!Number.isFinite(amount) || !Number.isInteger(amount)) {
+    throw new BadRequestException("Fee amount must be an integer number of minor units");
+  }
+  return BigInt(amount);
 }

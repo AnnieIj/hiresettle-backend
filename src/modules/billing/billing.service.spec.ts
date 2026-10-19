@@ -4,6 +4,9 @@ import { BillingService } from './billing.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 import { ExchangeRateService } from '../../common/exchange-rates/exchange-rate.service';
+import { CreditLedgerService } from './credit-ledger.service';
+
+const mockCredits = { getBalance: jest.fn(), applyToFee: jest.fn() };
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -83,6 +86,7 @@ describe('BillingService — exportBillingHistory()', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: StellarService, useValue: mockStellar },
         { provide: ExchangeRateService, useValue: mockExchangeRates },
+        { provide: CreditLedgerService, useValue: mockCredits },
       ],
     }).compile();
 
@@ -223,6 +227,7 @@ describe('BillingService — getBillingSummary() fiat totals', () => {
         { provide: PrismaService, useValue: mockPrisma },
         { provide: StellarService, useValue: mockStellar },
         { provide: ExchangeRateService, useValue: mockExchangeRates },
+        { provide: CreditLedgerService, useValue: mockCredits },
       ],
     }).compile();
 

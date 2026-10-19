@@ -128,6 +128,40 @@ enum DisputeAppealStatus {
   DECIDED
 }
 
+// Restored: created by 20260927100000_milestone_workflow_enhancements but
+// dropped from the schema by a later merge (#376–#379).
+enum PartialReleaseStatus {
+  PROPOSED
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+enum PartialRemainderAction {
+  REFUND
+  RETAIN
+}
+
+enum ProofSlaAction {
+  AUTO_APPROVE
+  ESCALATE_TO_ADMIN
+}
+
+enum ProofVersionStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+// Prepaid credit ledger entry kinds (#507)
+enum CreditLedgerEntryType {
+  PURCHASE       // credits bought by the company
+  GRANT          // promotional / goodwill credits issued by an admin
+  FEE_DEDUCTION  // credits consumed to pay a platform fee
+  REVERSAL       // a previous entry undone (e.g. a refunded fee)
+  ADJUSTMENT     // manual admin correction, positive or negative
+}
+
 // ============================================================
 // MODELS
 // ============================================================
@@ -184,6 +218,9 @@ model User {
   // Tokenized iCal feed (#380): SHA-256 of the raw feed token; null = feed disabled
   calendarTokenHash          String?  @unique
   calendarTokenCreatedAt     DateTime?
+  // Company proof review SLA settings (#377)
+  proofSlaDays               Int            @default(7)
+  proofSlaAction             ProofSlaAction @default(ESCALATE_TO_ADMIN)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -224,6 +261,8 @@ model User {
   trustedDevices       TrustedDevice[]
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
   arbiterRecusals      ArbiterRecusal[]
+  milestoneComments    MilestoneComment[]
+  creditLedgerEntries  CreditLedger[]           @relation("CompanyCreditLedger")
 
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
@@ -469,6 +508,9 @@ model Milestone {
   approvals          MilestoneApproval[]
   refunds            Refund[]
   disputes           Dispute[]
+  proofVersions      MilestoneProofVersion[]
+  partialReleases    MilestonePartialRelease[]
+  comments           MilestoneComment[]
 
   @@unique([engagementId, milestoneIndex])
   @@index([status])
@@ -1099,4 +1141,107 @@ model UnmatchedPayment {
   @@index([sender])
   @@index([createdAt])
   @@map("unmatched_payments")
+}
+
+// ============================================================
+// MILESTONE WORKFLOW (#376–#379) — restored, tables already exist
+// ============================================================
+
+model MilestoneProofVersion {
+  id               String             @id @default(uuid())
+  milestoneId      String
+  versionNumber    Int
+  proofUrl         String?
+  content          String?
+  proofHash        String?
+  submittedById    String?
+  submittedAt      DateTime           @default(now())
+  status           ProofVersionStatus @default(SUBMITTED)
+  reviewedById     String?
+  reviewedAt       DateTime?
+  rejectionReason  String?
+  // Review SLA bookkeeping (#377) — per version, so a resubmission restarts the clock
+  reminder50SentAt DateTime?
+  reminder90SentAt DateTime?
+  slaExpiredAt     DateTime?
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+
+  @@unique([milestoneId, versionNumber])
+  @@index([status, submittedAt])
+  @@map("milestone_proof_versions")
+}
+
+model MilestonePartialRelease {
+  id                  String                 @id @default(uuid())
+  milestoneId         String
+  engagementId        String
+  proposedById        String
+  releaseAmount       BigInt                 // stroops paid to the recruiter
+  remainderAmount     BigInt                 // stroops left after the release
+  remainderAction     PartialRemainderAction
+  reason              String?
+  status              PartialReleaseStatus   @default(PROPOSED)
+  companyApproverId   String?
+  companyApprovedAt   DateTime?
+  recruiterApproverId String?
+  recruiterApprovedAt DateTime?
+  txHash              String?
+  executedAt          DateTime?
+  failureReason       String?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+
+  @@index([milestoneId, status])
+  @@index([engagementId])
+  @@map("milestone_partial_releases")
+}
+
+model MilestoneComment {
+  id           String   @id @default(uuid())
+  milestoneId  String
+  engagementId String
+  authorId     String
+  body         String
+  createdAt    DateTime @default(now())
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  author    User      @relation(fields: [authorId], references: [id])
+
+  @@index([milestoneId, createdAt])
+  @@index([engagementId, createdAt])
+  @@map("milestone_comments")
+}
+
+// ============================================================
+// PREPAID CREDITS (#507)
+// ============================================================
+
+// Append-only ledger of a company's prepaid platform credits. Rows are never
+// updated or deleted (enforced by a database trigger); corrections are new
+// REVERSAL / ADJUSTMENT entries. `sequence` is gap-free per company and
+// `balanceAfter` snapshots the running balance, so the history is auditable
+// and the current balance is the latest row's balanceAfter.
+model CreditLedger {
+  id             String                @id @default(uuid())
+  companyId      String                // users.id of the COMPANY account
+  sequence       Int                   // 1, 2, 3… per company; unique → serialises concurrent writers
+  type           CreditLedgerEntryType
+  amount         BigInt                // signed, minor units: > 0 adds credit, < 0 consumes it
+  balanceAfter   BigInt                // running balance after this entry (never negative)
+  description    String?
+  reference      String?               // external reference, e.g. a platform fee / charge id
+  idempotencyKey String?               // same key → same entry, never applied twice
+  createdById    String?               // admin or system actor; null for automatic fee deductions
+  createdAt      DateTime              @default(now())
+
+  company User @relation("CompanyCreditLedger", fields: [companyId], references: [id], onDelete: Restrict)
+
+  @@unique([companyId, sequence])
+  @@unique([companyId, idempotencyKey])
+  @@index([companyId, createdAt])
+  @@index([reference])
+  @@map("credit_ledger")
 }

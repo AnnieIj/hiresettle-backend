@@ -54,6 +54,9 @@ export const envValidationSchema = Joi.object({
   DISPUTE_SLA_ASSIGNMENT_HOURS: Joi.number().integer().min(1).max(720).default(24),
   DISPUTE_SLA_REVIEW_HOURS: Joi.number().integer().min(1).max(720).default(72),
   DISPUTE_SLA_APPEAL_HOURS: Joi.number().integer().min(1).max(720).default(72),
+
+  // Runtime SystemConfig (#503): how often each replica reloads admin overrides (0 disables polling).
+  SYSTEM_CONFIG_REFRESH_MS: Joi.number().integer().min(0).default(30000),
   
   // Database connection pooling
   DATABASE_POOL_MIN: Joi.number().integer().min(1).max(20).default(2),
