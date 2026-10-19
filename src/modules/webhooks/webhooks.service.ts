@@ -1,18 +1,10 @@
-import {
-  Injectable,
-  Logger,
-  Optional,
-  UnauthorizedException,
-} from "@nestjs/common";
-import { InjectQueue } from "@nestjs/bullmq";
-import { Queue } from "bullmq";
-import axios from "axios";
-import * as crypto from "crypto";
-import {
-  signWebhookBody,
-  WEBHOOK_SIGNATURE_HEADER,
-} from "./webhook-signing.util";
-import { buildWebhookRawBody } from "./webhook-payload.util";
+import { Injectable, Logger, Optional, UnauthorizedException } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
+import axios from 'axios';
+import * as crypto from 'crypto';
+import { signWebhookBody, WEBHOOK_SIGNATURE_HEADER } from './webhook-signing.util';
 
 export interface WebhookPayload {
   event:
@@ -39,14 +31,25 @@ export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
 
   constructor(
-    @Optional() @InjectQueue("webhook") private readonly webhookQueue?: Queue,
+    @Optional() @InjectQueue('webhook') private readonly webhookQueue?: Queue,
+    @Optional() private readonly config?: ConfigService,
   ) {}
 
-  async sendWebhook(
-    url: string,
-    payload: WebhookPayload,
-    meta: WebhookDeliveryMeta = {},
-  ): Promise<void> {
+  /**
+   * Egress IP addresses/CIDR ranges that outgoing webhook deliveries may
+   * originate from, so subscribers can allowlist them (#491).
+   * Configured via the comma-separated WEBHOOK_SOURCE_IPS env var.
+   */
+  getSourceIps(): { sourceIps: string[] } {
+    const raw = this.config?.get<string>('WEBHOOK_SOURCE_IPS') ?? process.env.WEBHOOK_SOURCE_IPS ?? '';
+    const sourceIps = raw
+      .split(',')
+      .map((ip) => ip.trim())
+      .filter((ip) => ip.length > 0);
+    return { sourceIps };
+  }
+
+  async sendWebhook(url: string, payload: WebhookPayload, meta: WebhookDeliveryMeta = {}): Promise<void> {
     if (!url) return;
 
     if (this.webhookQueue) {

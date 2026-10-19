@@ -40,7 +40,15 @@ async function bootstrap() {
   const allowedOrigins = allowedOriginsStr
     .split(",")
     .map((origin) => origin.trim());
-  const sentryDsn = config.get<string>("SENTRY_DSN");
+  const corsAllowedHeaders = config
+    .get<string>(
+      'CORS_ALLOWED_HEADERS',
+      'Content-Type, Authorization, Idempotency-Key, X-API-Key, If-None-Match, X-Request-Id',
+    )
+    .split(',')
+    .map((header) => header.trim())
+    .filter(Boolean);
+  const sentryDsn = config.get<string>('SENTRY_DSN');
 
   if (sentryDsn && !["test", "ci"].includes(nodeEnv)) {
     Sentry.init({
@@ -88,8 +96,17 @@ async function bootstrap() {
 
   app.enableCors({
     origin: corsOriginValidator,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: corsAllowedHeaders,
+    exposedHeaders: [
+      'ETag',
+      'X-Request-Id',
+      'X-Request-ID',
+      'Retry-After',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+    ],
     credentials: true,
   });
 
