@@ -214,6 +214,7 @@ model User {
   milestoneApprovals   MilestoneApproval[]
   recruiterReviews     RecruiterReview[]        @relation("RecruiterReviews")
   reviewerReviews      RecruiterReview[]        @relation("ReviewerReviews")
+  portfolioEntries     RecruiterPortfolioEntry[] @relation("RecruiterPortfolio")
   kycDocuments         KycDocument[]
   teamInvites          TeamInvite[]             @relation("TeamInvites")
   savedFilters         SavedFilter[]
@@ -231,6 +232,9 @@ model User {
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
   @@index([kycStatus])
+  @@index([email])                   // #474 — admin user search by email
+  @@index([stellarAddress])          // #474 — admin user search by Stellar address
+  @@index([company])                 // #474 — admin user search by company name
   @@map("users")
 }
 

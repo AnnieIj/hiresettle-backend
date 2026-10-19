@@ -7,6 +7,10 @@ export class ListUsersDto {
   @ApiPropertyOptional() @IsOptional() @IsString()
   search?: string;
 
+  @ApiPropertyOptional({ description: 'Search by email, Stellar address or company name' })
+  @IsOptional() @IsString()
+  q?: string;
+
   @ApiPropertyOptional({ enum: UserRole }) @IsOptional() @IsEnum(UserRole)
   role?: UserRole;
 

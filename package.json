@@ -141,6 +141,12 @@
     "collectCoverageFrom": [
       "**/*.(t|j)s"
     ],
+    "coveragePathIgnorePatterns": [
+      "/node_modules/",
+      "\\.dto\\.ts$",
+      "\\.module\\.ts$",
+      "main\\.ts$"
+    ],
     "coverageDirectory": "../coverage",
     "coverageThreshold": {
       "global": {
