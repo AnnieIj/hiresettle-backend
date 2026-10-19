@@ -261,7 +261,6 @@ export class CompaniesService {
     // Original owner: companyId == their own userId
     return userId;
   }
-}
 
   // ----------------------------------------------------------
   // COMPANY ENGAGEMENT STATS (#374)

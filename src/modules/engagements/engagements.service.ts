@@ -1155,7 +1155,6 @@ export class EngagementsService {
 
     return this.findOne(engagementId);
   }
-}
 
   // ----------------------------------------------------------
   // ENGAGEMENT COMMENTS (#368)

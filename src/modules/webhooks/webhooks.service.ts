@@ -24,6 +24,7 @@ export interface WebhookPayload {
   engagementId: string;
   status: string;
   timestamp: string;
+  [key: string]: unknown;
 }
 
 export interface WebhookDeliveryMeta {
