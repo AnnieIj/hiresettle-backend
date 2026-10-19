@@ -3,6 +3,10 @@ import { MulterModule } from '@nestjs/platform-express';
 import { EngagementsController } from './engagements.controller';
 import { EngagementsService } from './engagements.service';
 import { SavedFiltersService } from './saved-filters.service';
+import { EngagementNotesService } from './engagement-notes.service';
+import { EngagementWatchersService } from './engagement-watchers.service';
+import { EngagementImportService } from './engagement-import.service';
+import { EngagementCandidateDetailsService } from './engagement-candidate-details.service';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminModule } from '../admin/admin.module';
 import { PrismaModule } from '../../common/prisma/prisma.module';
@@ -21,7 +25,25 @@ import { AuthModule } from '../auth/auth.module';
     MulterModule.register({ limits: { fileSize: 5 * 1024 * 1024 } }), // max 5 MB CSV
   ],
   controllers: [EngagementsController],
-  providers: [EngagementsService, SavedFiltersService, AuditLogService, IdempotencyInterceptor],
-  exports: [EngagementsService, AuditLogService],
+  providers: [
+    EngagementsService,
+    SavedFiltersService,
+    AuditLogService,
+    IdempotencyInterceptor,
+    // Focused sub-services extracted in #443
+    EngagementNotesService,
+    EngagementWatchersService,
+    EngagementImportService,
+    EngagementCandidateDetailsService,
+  ],
+  exports: [
+    EngagementsService,
+    AuditLogService,
+    // Export sub-services so other modules (e.g. EventsModule) can inject them directly
+    EngagementNotesService,
+    EngagementWatchersService,
+    EngagementImportService,
+    EngagementCandidateDetailsService,
+  ],
 })
 export class EngagementsModule {}

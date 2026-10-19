@@ -1,15 +1,28 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { Test, TestingModule } from '@nestjs/testing';
 import { EngagementsService } from './engagements.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuditLogService } from './audit-log.service';
+import { EngagementNotesService } from './engagement-notes.service';
+import { EngagementImportService } from './engagement-import.service';
+import { EngagementCandidateDetailsService } from './engagement-candidate-details.service';
 import {
   ConflictException,
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
-import { EngagementStatus, NotificationType, UserRole } from '@prisma/client';
+
+// Use string literals because @prisma/client enums are not available in the Jest mock environment
+const EngagementStatus = {
+  ACTIVE: 'ACTIVE',
+  PENDING_ACCEPTANCE: 'PENDING_ACCEPTANCE',
+  COMPLETED: 'COMPLETED',
+  CANCELLED: 'CANCELLED',
+  REPLACEMENT_REQUESTED: 'REPLACEMENT_REQUESTED',
+} as const;
+const UserRole = { ADMIN: 'ADMIN', ARBITER: 'ARBITER', COMPANY: 'COMPANY', RECRUITER: 'RECRUITER' } as const;
 
 // ----------------------------------------------------------------
 // Shared mock factories
@@ -101,6 +114,9 @@ describe('EngagementsService', () => {
         { provide: StellarService, useValue: mockStellar },
         { provide: NotificationsService, useValue: mockNotifications },
         { provide: AuditLogService, useValue: mockAuditLog },
+        { provide: EngagementNotesService, useValue: { createNote: jest.fn(), findNotes: jest.fn() } },
+        { provide: EngagementImportService, useValue: { importFromCsv: jest.fn() } },
+        { provide: EngagementCandidateDetailsService, useValue: { getSummary: jest.fn() } },
       ],
     }).compile();
 
@@ -124,12 +140,15 @@ describe('EngagementsService', () => {
       mockPrisma.retentionSchedule.create.mockResolvedValue({});
     });
 
-    it('creates engagement and persists with retention schedules', async () => {
+    it('creates engagement as PENDING_ACCEPTANCE without on-chain submission', async () => {
+      // create() is now the first step of a two-phase flow.
+      // On-chain submission is deferred to acceptInvite() after the recruiter accepts.
       const result = await service.create(baseUser, baseDto as any);
       expect(result.id).toBe('ENG-001');
-      expect(mockStellar.submitCreateEngagement).toHaveBeenCalledTimes(1);
       expect(mockPrisma.engagement.create).toHaveBeenCalledTimes(1);
-      expect(mockPrisma.retentionSchedule.create).toHaveBeenCalledTimes(2);
+      // No stellar call at create time — deferred to acceptInvite()
+      expect(mockStellar.submitCreateEngagement).not.toHaveBeenCalled();
+      expect(mockStellar.checkTokenBalance).not.toHaveBeenCalled();
     });
 
     it('throws ConflictException when engagement already exists', async () => {
@@ -144,10 +163,12 @@ describe('EngagementsService', () => {
       await expect(service.create(baseUser, baseDto as any)).rejects.toThrow(BadRequestException);
     });
 
-    it('throws BadRequestException when company has insufficient token balance', async () => {
-      mockPrisma.engagement.findUnique.mockResolvedValue(null);
+    it('does not check token balance during create (balance checked at acceptInvite)', async () => {
+      // Balance check was moved to acceptInvite() — create() should succeed regardless
       mockStellar.checkTokenBalance.mockResolvedValue({ sufficient: false, balance: 0n });
-      await expect(service.create(baseUser, baseDto as any)).rejects.toThrow(BadRequestException);
+      const result = await service.create(baseUser, baseDto as any);
+      expect(result.id).toBe('ENG-001');
+      expect(mockStellar.checkTokenBalance).not.toHaveBeenCalled();
       expect(mockStellar.submitCreateEngagement).not.toHaveBeenCalled();
     });
 
@@ -170,11 +191,12 @@ describe('EngagementsService', () => {
       expect(typeof result.releasedAmount).toBe('string');
     });
 
-    it('propagates StellarError when on-chain submission fails', async () => {
-      mockPrisma.engagement.findUnique.mockResolvedValue(null);
+    it('still persists engagement even when stellar is configured to fail (stellar not called at create)', async () => {
+      // On-chain submission happens in acceptInvite(), not create()
       mockStellar.submitCreateEngagement.mockRejectedValue(new Error('Soroban error'));
-      await expect(service.create(baseUser, baseDto as any)).rejects.toThrow('Soroban error');
-      expect(mockPrisma.engagement.create).not.toHaveBeenCalled();
+      const result = await service.create(baseUser, baseDto as any);
+      expect(result.id).toBe('ENG-001');
+      expect(mockPrisma.engagement.create).toHaveBeenCalledTimes(1);
     });
   });
 
