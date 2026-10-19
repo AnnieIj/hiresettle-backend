@@ -38,6 +38,7 @@ import { AnnouncementsModule } from './modules/announcements/announcements.modul
 import { BillingModule } from './modules/billing/billing.module';
 import { TeamInvitesModule } from './modules/team-invites/team-invites.module';
 import { CompaniesModule } from './modules/companies/companies.module';
+import { EmailModule } from './email/email.module';
 import { GraphqlModule } from './graphql/graphql.module';
 import stellarConfig from './config/stellar.config';
 import { MaintenanceModeModule } from './common/maintenance/maintenance-mode.module';
@@ -93,6 +94,7 @@ import { DevModule } from './modules/dev/dev.module';
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
   ],

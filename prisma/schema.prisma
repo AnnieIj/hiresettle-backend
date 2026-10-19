@@ -909,12 +909,15 @@ model FavoriteRecruiter {
 // Existing single-user company accounts are implicitly OWNER; a CompanyMember row is
 // only required when additional team members are added.
 model CompanyMember {
-  id          String      @id @default(uuid())
-  companyId   String
-  memberId    String
-  companyRole CompanyRole @default(MEMBER)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id            String      @id @default(uuid())
+  companyId     String
+  memberId      String
+  companyRole   CompanyRole @default(MEMBER)
+  // Issue #479: optional cap on how much this member may fund across engagements.
+  // Stored in the smallest currency unit (e.g. cents). NULL means no cap.
+  spendingLimit Int?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   company User @relation("CompanyOwner", fields: [companyId], references: [id], onDelete: Cascade)
   member  User @relation("MemberUser",   fields: [memberId],  references: [id], onDelete: Cascade)
@@ -1099,4 +1102,74 @@ model UnmatchedPayment {
   @@index([sender])
   @@index([createdAt])
   @@map("unmatched_payments")
+}
+
+// ============================================================
+// ISSUE #478 — EMAIL BOUNCE / COMPLAINT SUPPRESSION
+// Hard-bounced or complaint addresses are suppressed so no
+// further sends are attempted, protecting sender reputation.
+// ============================================================
+
+enum EmailSuppressionReason {
+  HARD_BOUNCE
+  COMPLAINT
+  MANUAL
+}
+
+model SuppressedEmail {
+  id         String                 @id @default(uuid())
+  email      String                 @unique
+  reason     EmailSuppressionReason
+  sourceId   String?                // SNS/SES message-id for audit trail
+  createdAt  DateTime               @default(now())
+
+  @@index([email])
+  @@map("suppressed_emails")
+}
+
+// ============================================================
+// ISSUE #489 — SAML / OIDC SINGLE SIGN-ON
+// Per-company IdP configuration. OIDC is supported first;
+// SAML support is gated by the ssoProtocol field.
+// ============================================================
+
+enum SsoProtocol {
+  OIDC
+  SAML
+}
+
+model CompanySsoConfig {
+  id           String      @id @default(uuid())
+  companyId    String      @unique  // references User.id of the company owner
+  protocol     SsoProtocol @default(OIDC)
+  issuer       String                // OIDC: issuer URL  | SAML: entityId
+  clientId     String?               // OIDC only
+  clientSecret String?               // OIDC only (encrypted at rest by app layer)
+  metadataUrl  String?               // OIDC discovery URL or SAML metadata URL
+  defaultRole  String      @default("MEMBER")
+  isEnabled    Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@map("company_sso_configs")
+}
+
+// ============================================================
+// ISSUE #494 — SEP-10 STELLAR WEB AUTHENTICATION
+// Stores the nonce challenge issued to a wallet so it can be
+// verified when the signed transaction envelope comes back.
+// ============================================================
+
+model Sep10Challenge {
+  id          String   @id @default(uuid())
+  account     String               // Stellar account G… address
+  nonce       String   @unique     // random nonce embedded in the challenge tx
+  xdr         String               // base64 challenge transaction XDR
+  expiresAt   DateTime
+  usedAt      DateTime?            // set once the challenge is successfully verified
+  createdAt   DateTime @default(now())
+
+  @@index([account])
+  @@index([expiresAt])
+  @@map("sep10_challenges")
 }

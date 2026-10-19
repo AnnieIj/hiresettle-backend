@@ -5,6 +5,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  Patch,
   Post,
   Put,
   UseGuards,
@@ -28,6 +30,7 @@ import { CompaniesService } from './companies.service';
 import { InitiateTransferDto } from './dto/initiate-transfer.dto';
 import { UpdateProofSlaSettingsDto } from './dto/proof-sla-settings.dto';
 import { CompanyStatsQueryDto } from './dto/company-stats-query.dto';
+import { SetSpendingLimitDto } from './dto/spending-limit.dto';
 
 @ApiTags('companies')
 @Controller('companies')
@@ -177,5 +180,24 @@ export class CompaniesController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   getEngagementStats(@Request() req: any, @Query() query: CompanyStatsQueryDto) {
     return this.companiesService.getEngagementStats(req.user.id, query.dateFrom, query.dateTo);
+  }
+
+  // ── Issue #479: per-member spending limits ────────────────────────────────
+
+  @Patch('members/:memberId/spending-limit')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard, CompanyRoleGuard)
+  @Roles(UserRole.COMPANY)
+  @CompanyRoles(CompanyRole.OWNER)
+  @ApiOperation({ summary: 'Set or clear the spending limit for a company member (#479)' })
+  @ApiResponse({ status: 200, description: 'Spending limit updated' })
+  @ApiResponse({ status: 403, description: 'Limit would be exceeded or caller is not OWNER' })
+  @ApiResponse({ status: 404, description: 'Member not found' })
+  setMemberSpendingLimit(
+    @Request() req: any,
+    @Param('memberId') memberId: string,
+    @Body() dto: SetSpendingLimitDto,
+  ) {
+    return this.companiesService.setMemberSpendingLimit(req.user.id, memberId, dto);
   }
 }
