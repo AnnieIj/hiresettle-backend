@@ -92,6 +92,10 @@ async function bootstrap() {
   app.setGlobalPrefix(apiPrefix, {
     exclude: [
       { path: 'health', method: RequestMethod.GET },
+      // Kubernetes probes (#510) and the JWKS (#481) live at well-known roots.
+      { path: 'healthz/live', method: RequestMethod.GET },
+      { path: 'healthz/ready', method: RequestMethod.GET },
+      { path: '.well-known/jwks.json', method: RequestMethod.GET },
       { path: 'docs', method: RequestMethod.GET },
       { path: 'docs-json', method: RequestMethod.GET },
       { path: 'metrics', method: RequestMethod.GET },

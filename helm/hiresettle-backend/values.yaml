@@ -1,0 +1,140 @@
+# Reference values for the HireSettle API (#510).
+# Override per environment with -f values-<env>.yaml or --set.
+
+replicaCount: 2
+
+image:
+  repository: ghcr.io/trusthire/hiresettle-backend
+  # Defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  # Generated from the fullname template when empty.
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+containerPort: 3000
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+# Non-secret configuration, rendered into a ConfigMap and loaded with envFrom.
+config:
+  NODE_ENV: production
+  PORT: "3000"
+  API_PREFIX: api/v1
+  LOG_LEVEL: log
+  STELLAR_NETWORK: testnet
+  ALLOWED_ORIGINS: https://app.hiresettle.example
+  # JWT_SIGNING_KEYS_FILE is injected automatically when jwtSigningKeys.enabled.
+
+# Secret environment variables (DATABASE_URL, JWT_SECRET, SMTP_*, REDIS_URL,
+# SOROBAN_CONTRACT_ADDRESS, ...).
+secrets:
+  # Name of a pre-existing Secret (recommended: managed by External Secrets,
+  # Sealed Secrets, Vault, ...). When set, the chart creates no Secret.
+  existingSecret: ""
+  # Only used when existingSecret is empty. Do not commit real values.
+  values: {}
+    # DATABASE_URL: postgresql://user:pass@postgres:5432/hiresettle_db
+    # REDIS_URL: redis://redis:6379
+    # JWT_SECRET: <openssl rand -base64 32>
+    # SOROBAN_CONTRACT_ADDRESS: C...
+    # SMTP_HOST: smtp.example.com
+    # SMTP_USER: user
+    # SMTP_PASS: pass
+
+# RS256 signing keys for access tokens (#481), mounted as a file so keys can be
+# rotated by updating the Secret: add the new key with its privateKey, keep the
+# previous one as publicKey-only until its tokens have expired.
+jwtSigningKeys:
+  enabled: true
+  # Secret holding a "signing-keys.json" entry with
+  # [{ "kid": "...", "privateKey": "...", "publicKey": "..." }, ...].
+  existingSecret: ""
+  key: signing-keys.json
+  mountPath: /etc/hiresettle/jwt
+
+# Extra plain env vars, e.g. JWT_ACTIVE_KID during a rotation.
+extraEnv: []
+  # - name: JWT_ACTIVE_KID
+  #   value: "2026-10"
+
+# Run `prisma migrate deploy` in an init container before the API starts.
+# Prisma takes an advisory lock, so concurrent pods are safe.
+migrations:
+  enabled: true
+  command: ["npx", "prisma", "migrate", "deploy"]
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+probes:
+  startup:
+    path: /healthz/live
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+  liveness:
+    path: /healthz/live
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    path: /healthz/ready
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Seconds to let in-flight requests drain (NestJS shutdown hooks are enabled).
+terminationGracePeriodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
