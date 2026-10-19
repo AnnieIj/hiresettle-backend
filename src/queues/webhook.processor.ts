@@ -1,11 +1,15 @@
-import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
-import { Job } from 'bullmq';
-import axios from 'axios';
-import { QUEUE_WEBHOOK } from './queues.module';
-import { WebhookPayload } from '../modules/webhooks/webhooks.service';
-import { signWebhookBody, WEBHOOK_SIGNATURE_HEADER } from '../modules/webhooks/webhook-signing.util';
-import { PrismaService } from '../common/prisma/prisma.service';
+import { Processor, WorkerHost, OnWorkerEvent } from "@nestjs/bullmq";
+import { Logger, Optional } from "@nestjs/common";
+import { Job } from "bullmq";
+import axios from "axios";
+import { QUEUE_WEBHOOK } from "./queues.module";
+import { WebhookPayload } from "../modules/webhooks/webhooks.service";
+import {
+  signWebhookBody,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "../modules/webhooks/webhook-signing.util";
+import { PrismaService } from "../common/prisma/prisma.service";
+import { MetricsService } from "../metrics/metrics.service";
 
 export interface WebhookJobData {
   url: string;
@@ -15,29 +19,43 @@ export interface WebhookJobData {
   subscriptionId?: string;
   /** HTTP status of the most recent failed attempt, kept for the delivery log (#397). */
   lastResponseCode?: number;
+  /** Timestamp when the job was first created, for latency tracking. */
+  startTime?: number;
 }
 
 @Processor(QUEUE_WEBHOOK)
 export class WebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(WebhookProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     super();
   }
 
   async process(job: Job<WebhookJobData>): Promise<void> {
     const { url, payload, secret } = job.data;
-    this.logger.log(`Delivering webhook job ${job.id} to ${url} (event: ${payload.event}, attempt: ${job.attemptsMade + 1})`);
+    const startTime = job.data.startTime ?? Date.now();
+
+    this.logger.log(
+      `Delivering webhook job ${job.id} to ${url} (event: ${payload.event}, attempt: ${job.attemptsMade + 1})`,
+    );
 
     const rawBody = JSON.stringify(payload);
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (secret) {
       headers[WEBHOOK_SIGNATURE_HEADER] = signWebhookBody(rawBody, secret);
     }
 
     let responseCode: number;
     try {
-      const response = await axios.post(url, rawBody, { timeout: 5000, headers });
+      const response = await axios.post(url, rawBody, {
+        timeout: 5000,
+        headers,
+      });
       responseCode = response.status;
     } catch (error) {
       const status: number | undefined = error?.response?.status;
@@ -49,17 +67,28 @@ export class WebhookProcessor extends WorkerHost {
 
     this.logger.log(`Webhook job ${job.id} delivered to ${url}`);
 
+    // Record successful delivery metrics
+    if (this.metrics) {
+      const duration = Date.now() - startTime;
+      this.metrics.recordWebhookDelivery(
+        "success",
+        payload.event,
+        duration,
+        job.attemptsMade + 1,
+      );
+    }
+
     // Successful subscription deliveries are logged so companies can audit them (#397).
     if (job.data.subscriptionId) {
       await this.recordDelivery(job, {
-        status: 'SUCCEEDED',
+        status: "SUCCEEDED",
         attempts: job.attemptsMade + 1,
         responseCode,
       });
     }
   }
 
-  @OnWorkerEvent('failed')
+  @OnWorkerEvent("failed")
   async onFailed(job: Job<WebhookJobData>): Promise<void> {
     const maxAttempts = job.opts?.attempts ?? 1;
     if (job.attemptsMade < maxAttempts) {
@@ -67,13 +96,26 @@ export class WebhookProcessor extends WorkerHost {
       return;
     }
 
-    const { url } = job.data;
+    const { url, payload } = job.data;
+    const startTime = job.data.startTime ?? Date.now();
+
     this.logger.error(
       `Webhook job ${job.id} to ${url} exhausted all ${job.attemptsMade} attempts: ${job.failedReason}`,
     );
 
+    // Record failed delivery metrics
+    if (this.metrics) {
+      const duration = Date.now() - startTime;
+      this.metrics.recordWebhookDelivery(
+        "failure",
+        payload.event,
+        duration,
+        job.attemptsMade,
+      );
+    }
+
     await this.recordDelivery(job, {
-      status: 'FAILED',
+      status: "FAILED",
       attempts: job.attemptsMade,
       responseCode: job.data.lastResponseCode,
       errorMessage: job.failedReason,
@@ -83,7 +125,7 @@ export class WebhookProcessor extends WorkerHost {
   private async recordDelivery(
     job: Job<WebhookJobData>,
     result: {
-      status: 'SUCCEEDED' | 'FAILED';
+      status: "SUCCEEDED" | "FAILED";
       attempts: number;
       responseCode?: number;
       errorMessage?: string;
@@ -105,7 +147,9 @@ export class WebhookProcessor extends WorkerHost {
         },
       });
     } catch (error) {
-      this.logger.error(`Failed to record webhook delivery for job ${job.id}: ${error.message}`);
+      this.logger.error(
+        `Failed to record webhook delivery for job ${job.id}: ${error.message}`,
+      );
     }
   }
 }
