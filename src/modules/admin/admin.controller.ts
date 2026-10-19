@@ -174,7 +174,7 @@ export class AdminController {
   @Patch('engagements/:id/arbiter')
   @ApiOperation({
     summary: 'Assign or reassign an arbiter to an engagement',
-    description: 'Also pins the engagement's active disputes to this arbiter; manual assignments take precedence over auto-assignment.',
+    description: "Also pins the engagement's active disputes to this arbiter; manual assignments take precedence over auto-assignment.",
   })
   async assignArbiter(@Param('id') id: string, @Body() dto: AssignArbiterDto) {
     const updated = await this.adminUsers.assignArbiter(id, dto.arbiterId);

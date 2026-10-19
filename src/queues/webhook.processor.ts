@@ -1,11 +1,15 @@
-import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
-import { Job } from 'bullmq';
-import axios from 'axios';
-import { QUEUE_WEBHOOK } from './queues.module';
-import { WebhookPayload } from '../modules/webhooks/webhooks.service';
-import { signWebhookBody, WEBHOOK_SIGNATURE_HEADER } from '../modules/webhooks/webhook-signing.util';
-import { PrismaService } from '../common/prisma/prisma.service';
+import { Processor, WorkerHost, OnWorkerEvent } from "@nestjs/bullmq";
+import { Logger } from "@nestjs/common";
+import { Job } from "bullmq";
+import axios from "axios";
+import { QUEUE_WEBHOOK } from "./queues.module";
+import { WebhookPayload } from "../modules/webhooks/webhooks.service";
+import {
+  signWebhookBody,
+  WEBHOOK_SIGNATURE_HEADER,
+} from "../modules/webhooks/webhook-signing.util";
+import { buildWebhookRawBody } from "../modules/webhooks/webhook-payload.util";
+import { PrismaService } from "../common/prisma/prisma.service";
 
 export interface WebhookJobData {
   url: string;
@@ -27,17 +31,24 @@ export class WebhookProcessor extends WorkerHost {
 
   async process(job: Job<WebhookJobData>): Promise<void> {
     const { url, payload, secret } = job.data;
-    this.logger.log(`Delivering webhook job ${job.id} to ${url} (event: ${payload.event}, attempt: ${job.attemptsMade + 1})`);
+    this.logger.log(
+      `Delivering webhook job ${job.id} to ${url} (event: ${payload.event}, attempt: ${job.attemptsMade + 1})`,
+    );
 
-    const rawBody = JSON.stringify(payload);
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const rawBody = buildWebhookRawBody(payload);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
     if (secret) {
       headers[WEBHOOK_SIGNATURE_HEADER] = signWebhookBody(rawBody, secret);
     }
 
     let responseCode: number;
     try {
-      const response = await axios.post(url, rawBody, { timeout: 5000, headers });
+      const response = await axios.post(url, rawBody, {
+        timeout: 5000,
+        headers,
+      });
       responseCode = response.status;
     } catch (error) {
       const status: number | undefined = error?.response?.status;
@@ -52,14 +63,14 @@ export class WebhookProcessor extends WorkerHost {
     // Successful subscription deliveries are logged so companies can audit them (#397).
     if (job.data.subscriptionId) {
       await this.recordDelivery(job, {
-        status: 'SUCCEEDED',
+        status: "SUCCEEDED",
         attempts: job.attemptsMade + 1,
         responseCode,
       });
     }
   }
 
-  @OnWorkerEvent('failed')
+  @OnWorkerEvent("failed")
   async onFailed(job: Job<WebhookJobData>): Promise<void> {
     const maxAttempts = job.opts?.attempts ?? 1;
     if (job.attemptsMade < maxAttempts) {
@@ -73,7 +84,7 @@ export class WebhookProcessor extends WorkerHost {
     );
 
     await this.recordDelivery(job, {
-      status: 'FAILED',
+      status: "FAILED",
       attempts: job.attemptsMade,
       responseCode: job.data.lastResponseCode,
       errorMessage: job.failedReason,
@@ -83,7 +94,7 @@ export class WebhookProcessor extends WorkerHost {
   private async recordDelivery(
     job: Job<WebhookJobData>,
     result: {
-      status: 'SUCCEEDED' | 'FAILED';
+      status: "SUCCEEDED" | "FAILED";
       attempts: number;
       responseCode?: number;
       errorMessage?: string;
@@ -105,7 +116,9 @@ export class WebhookProcessor extends WorkerHost {
         },
       });
     } catch (error) {
-      this.logger.error(`Failed to record webhook delivery for job ${job.id}: ${error.message}`);
+      this.logger.error(
+        `Failed to record webhook delivery for job ${job.id}: ${error.message}`,
+      );
     }
   }
 }

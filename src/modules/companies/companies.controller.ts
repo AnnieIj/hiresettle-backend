@@ -162,7 +162,6 @@ export class CompaniesController {
   getPendingTransfer(@Request() req: any) {
     return this.companiesService.getPendingTransfer(req.user.id);
   }
-}
 
   // ── Issue #374: Company engagement stats ─────────────────────────────────
 

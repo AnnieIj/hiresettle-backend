@@ -65,6 +65,7 @@ enum NotificationType {
   DISPUTE_SLA_OVERDUE
   DISPUTE_APPEALED
   DISPUTE_APPEAL_DECIDED
+  DISPUTE_EVIDENCE_WINDOW_CLOSING
   COMMENT_ADDED
   WATCHER_ADDED
   UNMATCHED_PAYMENT_ALERT
@@ -213,6 +214,7 @@ model User {
   milestoneApprovals   MilestoneApproval[]
   recruiterReviews     RecruiterReview[]        @relation("RecruiterReviews")
   reviewerReviews      RecruiterReview[]        @relation("ReviewerReviews")
+  portfolioEntries     RecruiterPortfolioEntry[] @relation("RecruiterPortfolio")
   kycDocuments         KycDocument[]
   teamInvites          TeamInvite[]             @relation("TeamInvites")
   savedFilters         SavedFilter[]
@@ -220,14 +222,19 @@ model User {
   recruiterFavorites   FavoriteRecruiter[]      @relation("RecruiterFavorites")
   companyMembers       CompanyMember[]          @relation("CompanyOwner")
   memberOfCompanies    CompanyMember[]          @relation("MemberUser")
+  escrowSignerSets     CompanyEscrowSignerSet[] @relation("CompanyEscrowSignerSets")
   recoveryCodes        RecoveryCode[]
   trustedDevices       TrustedDevice[]
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
+  arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
 
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
   @@index([kycStatus])
+  @@index([email])                   // #474 — admin user search by email
+  @@index([stellarAddress])          // #474 — admin user search by Stellar address
+  @@index([company])                 // #474 — admin user search by company name
   @@map("users")
 }
 
@@ -1013,6 +1020,8 @@ model Dispute {
   fundsLocked             Boolean          @default(true)
   fundsReleasedAt         DateTime?
   isFinal                 Boolean          @default(false)
+  evidenceDeadline        DateTime?        // deadline for either party to upload evidence (#499)
+  evidenceDeadlineWarnedAt DateTime?       // set once both parties were warned the evidence window is closing
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
@@ -1026,7 +1035,25 @@ model Dispute {
   @@index([arbiterId, status])
   @@index([status, slaStatus, responseDeadline])
   @@index([status, appealDeadline])
+  @@index([status, evidenceDeadline])
   @@map("disputes")
+}
+
+// Records the arbiter fee deducted on dispute resolution (#500). One row per
+// settled dispute; the fee is held back from the amount released on-chain.
+model ArbiterPayout {
+  id         String   @id @default(uuid())
+  disputeId  String   @unique
+  arbiterId  String
+  feeType    String   // "FLAT" or "PERCENT", snapshot of config at resolution time
+  feeValue   Decimal  // snapshot of the configured flat amount or percent
+  amount     BigInt   // computed payout amount, in stroops
+  createdAt  DateTime @default(now())
+
+  arbiter User @relation(fields: [arbiterId], references: [id])
+
+  @@index([arbiterId])
+  @@map("arbiter_payouts")
 }
 
 // At most one appeal per dispute — enforced by @unique on disputeId (#382).
@@ -1105,71 +1132,89 @@ model UnmatchedPayment {
 }
 
 // ============================================================
-// ISSUE #478 — EMAIL BOUNCE / COMPLAINT SUPPRESSION
-// Hard-bounced or complaint addresses are suppressed so no
-// further sends are attempted, protecting sender reputation.
+// MULTISIG COMPANY ESCROW ACCOUNTS (#495)
 // ============================================================
 
-enum EmailSuppressionReason {
-  HARD_BOUNCE
-  COMPLAINT
-  MANUAL
+enum MultisigTxStatus {
+  PENDING    // collecting signatures, below threshold
+  SUBMITTED  // threshold met and submitted to Horizon
+  FAILED     // submission to Horizon failed
 }
 
-model SuppressedEmail {
-  id         String                 @id @default(uuid())
-  email      String                 @unique
-  reason     EmailSuppressionReason
-  sourceId   String?                // SNS/SES message-id for audit trail
-  createdAt  DateTime               @default(now())
+// One signer set + required threshold per company escrow account. A company
+// may rotate its signer set over time, so signerSets is 1:N off the owning
+// company (User) rather than embedding a fixed list on the user record.
+model CompanyEscrowSignerSet {
+  id              String   @id @default(uuid())
+  companyId       String
+  escrowAccountId String   // the Stellar account address this signer set guards
+  threshold       Int      // number of distinct signatures required before submission
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  @@index([email])
-  @@map("suppressed_emails")
+  company  User                      @relation("CompanyEscrowSignerSets", fields: [companyId], references: [id], onDelete: Cascade)
+  signers  CompanyEscrowSigner[]
+  pendingTxs MultisigPendingTransaction[]
+
+  @@unique([companyId, escrowAccountId])
+  @@index([companyId])
+  @@map("company_escrow_signer_sets")
 }
 
-// ============================================================
-// ISSUE #489 — SAML / OIDC SINGLE SIGN-ON
-// Per-company IdP configuration. OIDC is supported first;
-// SAML support is gated by the ssoProtocol field.
-// ============================================================
+// A single authorized signer (public key + optional linked user) within a
+// signer set.
+model CompanyEscrowSigner {
+  id            String   @id @default(uuid())
+  signerSetId   String
+  publicKey     String   // Stellar public key (G...) authorized to sign
+  userId        String?  // optional link to a platform user who controls this key
+  createdAt     DateTime @default(now())
 
-enum SsoProtocol {
-  OIDC
-  SAML
+  signerSet CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@unique([signerSetId, publicKey])
+  @@index([signerSetId])
+  @@map("company_escrow_signers")
 }
 
-model CompanySsoConfig {
-  id           String      @id @default(uuid())
-  companyId    String      @unique  // references User.id of the company owner
-  protocol     SsoProtocol @default(OIDC)
-  issuer       String                // OIDC: issuer URL  | SAML: entityId
-  clientId     String?               // OIDC only
-  clientSecret String?               // OIDC only (encrypted at rest by app layer)
-  metadataUrl  String?               // OIDC discovery URL or SAML metadata URL
-  defaultRole  String      @default("MEMBER")
-  isEnabled    Boolean     @default(false)
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+// A transaction awaiting enough signatures before it is submitted to
+// Horizon. `unsignedXdr` is the base envelope every signer signs a copy of;
+// `signedCount` is a denormalized cache of distinct signers collected so
+// far, enforced via the unique constraint on MultisigSignature.
+model MultisigPendingTransaction {
+  id              String           @id @default(uuid())
+  signerSetId     String
+  unsignedXdr     String           @db.Text
+  description     String?          // human-readable context, e.g. "Release milestone payment"
+  status          MultisigTxStatus @default(PENDING)
+  submittedTxHash String?
+  errorMessage    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
-  @@map("company_sso_configs")
+  signerSet  CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@index([signerSetId])
+  @@index([status])
+  @@map("multisig_pending_transactions")
 }
 
-// ============================================================
-// ISSUE #494 — SEP-10 STELLAR WEB AUTHENTICATION
-// Stores the nonce challenge issued to a wallet so it can be
-// verified when the signed transaction envelope comes back.
-// ============================================================
+// One row per signer per pending transaction. The unique constraint on
+// [pendingTxId, signerId] is what makes a duplicate submission from the
+// same signer a no-op rather than double-counting toward the threshold.
+model MultisigSignature {
+  id           String   @id @default(uuid())
+  pendingTxId  String
+  signerId     String
+  signedXdr    String   @db.Text // the signer's own signed copy of the envelope, from which we extract their signature
+  createdAt    DateTime @default(now())
 
-model Sep10Challenge {
-  id          String   @id @default(uuid())
-  account     String               // Stellar account G… address
-  nonce       String   @unique     // random nonce embedded in the challenge tx
-  xdr         String               // base64 challenge transaction XDR
-  expiresAt   DateTime
-  usedAt      DateTime?            // set once the challenge is successfully verified
-  createdAt   DateTime @default(now())
+  pendingTx MultisigPendingTransaction @relation(fields: [pendingTxId], references: [id], onDelete: Cascade)
+  signer    CompanyEscrowSigner        @relation(fields: [signerId], references: [id], onDelete: Cascade)
 
-  @@index([account])
-  @@index([expiresAt])
-  @@map("sep10_challenges")
+  @@unique([pendingTxId, signerId])
+  @@index([pendingTxId])
+  @@map("multisig_signatures")
 }

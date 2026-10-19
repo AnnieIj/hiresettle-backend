@@ -45,6 +45,13 @@ export class WebhooksController {
     return this.webhooks.listSupportedEvents();
   }
 
+  @Get('source-ips')
+  @ApiOperation({ summary: 'List the egress IP addresses outgoing webhook deliveries originate from' })
+  @ApiResponse({ status: 200, description: 'Source IP addresses/CIDR ranges to allowlist' })
+  getSourceIps() {
+    return this.webhooks.getSourceIps();
+  }
+
   @Post('billing')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Handle a payment-provider webhook delivery' })
