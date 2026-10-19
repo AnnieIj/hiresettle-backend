@@ -13,6 +13,7 @@ describe('DisputeSlaService', () => {
   const prisma = {
     dispute: { findMany: jest.fn(), updateMany: jest.fn() },
     user: { findMany: jest.fn() },
+    engagement: { findUnique: jest.fn() },
   };
   const notifications = { notifyUserById: jest.fn().mockResolvedValue(undefined) };
   const config = { get: jest.fn((key: string, fallback: unknown) => fallback) };
@@ -137,6 +138,68 @@ describe('DisputeSlaService', () => {
       prisma.dispute.updateMany.mockResolvedValue({ count: 0 });
 
       await expect(service.flagOverdueDisputes(NOW)).resolves.toBe(0);
+      expect(notifications.notifyUserById).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('notifyEvidenceDeadlinesClosing() (#499)', () => {
+    const closingSoon = {
+      id: 'dispute-1',
+      engagementId: 'ENG-001',
+      evidenceDeadline: new Date(NOW.getTime() + 6 * HOUR),
+    };
+    const engagement = { id: 'ENG-001', companyId: 'company-1', recruiterId: 'recruiter-1' };
+
+    it('only looks at active disputes with an un-warned, soon-closing evidence window', async () => {
+      prisma.dispute.findMany.mockResolvedValue([]);
+
+      await expect(service.notifyEvidenceDeadlinesClosing(NOW)).resolves.toBe(0);
+
+      expect(prisma.dispute.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            status: { in: ['OPEN', 'UNDER_REVIEW'] },
+            evidenceDeadlineWarnedAt: null,
+            evidenceDeadline: { not: null, lte: new Date(NOW.getTime() + 12 * HOUR), gt: NOW },
+          },
+        }),
+      );
+      expect(prisma.engagement.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('warns both the company and the recruiter and marks the dispute as warned', async () => {
+      prisma.dispute.findMany.mockResolvedValue([closingSoon]);
+      prisma.dispute.updateMany.mockResolvedValue({ count: 1 });
+      prisma.engagement.findUnique.mockResolvedValue(engagement);
+
+      await expect(service.notifyEvidenceDeadlinesClosing(NOW)).resolves.toBe(1);
+
+      expect(prisma.dispute.updateMany).toHaveBeenCalledWith({
+        where: { id: 'dispute-1', evidenceDeadlineWarnedAt: null },
+        data: { evidenceDeadlineWarnedAt: NOW },
+      });
+      expect(notifications.notifyUserById).toHaveBeenCalledTimes(2);
+      expect(notifications.notifyUserById).toHaveBeenCalledWith(
+        'company-1',
+        'DISPUTE_EVIDENCE_WINDOW_CLOSING',
+        expect.any(String),
+        expect.stringContaining('dispute-1'),
+        expect.objectContaining({ disputeId: 'dispute-1' }),
+      );
+      expect(notifications.notifyUserById).toHaveBeenCalledWith(
+        'recruiter-1',
+        'DISPUTE_EVIDENCE_WINDOW_CLOSING',
+        expect.any(String),
+        expect.any(String),
+        expect.objectContaining({ disputeId: 'dispute-1' }),
+      );
+    });
+
+    it('does not re-warn when another run already warned the dispute', async () => {
+      prisma.dispute.findMany.mockResolvedValue([closingSoon]);
+      prisma.dispute.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(service.notifyEvidenceDeadlinesClosing(NOW)).resolves.toBe(0);
       expect(notifications.notifyUserById).not.toHaveBeenCalled();
     });
   });

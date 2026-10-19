@@ -65,6 +65,7 @@ enum NotificationType {
   DISPUTE_SLA_OVERDUE
   DISPUTE_APPEALED
   DISPUTE_APPEAL_DECIDED
+  DISPUTE_EVIDENCE_WINDOW_CLOSING
   COMMENT_ADDED
   WATCHER_ADDED
   UNMATCHED_PAYMENT_ALERT
@@ -221,9 +222,11 @@ model User {
   recruiterFavorites   FavoriteRecruiter[]      @relation("RecruiterFavorites")
   companyMembers       CompanyMember[]          @relation("CompanyOwner")
   memberOfCompanies    CompanyMember[]          @relation("MemberUser")
+  escrowSignerSets     CompanyEscrowSignerSet[] @relation("CompanyEscrowSignerSets")
   recoveryCodes        RecoveryCode[]
   trustedDevices       TrustedDevice[]
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
+  arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
 
   @@index([role, deactivatedAt])
@@ -1014,6 +1017,8 @@ model Dispute {
   fundsLocked             Boolean          @default(true)
   fundsReleasedAt         DateTime?
   isFinal                 Boolean          @default(false)
+  evidenceDeadline        DateTime?        // deadline for either party to upload evidence (#499)
+  evidenceDeadlineWarnedAt DateTime?       // set once both parties were warned the evidence window is closing
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
@@ -1027,7 +1032,25 @@ model Dispute {
   @@index([arbiterId, status])
   @@index([status, slaStatus, responseDeadline])
   @@index([status, appealDeadline])
+  @@index([status, evidenceDeadline])
   @@map("disputes")
+}
+
+// Records the arbiter fee deducted on dispute resolution (#500). One row per
+// settled dispute; the fee is held back from the amount released on-chain.
+model ArbiterPayout {
+  id         String   @id @default(uuid())
+  disputeId  String   @unique
+  arbiterId  String
+  feeType    String   // "FLAT" or "PERCENT", snapshot of config at resolution time
+  feeValue   Decimal  // snapshot of the configured flat amount or percent
+  amount     BigInt   // computed payout amount, in stroops
+  createdAt  DateTime @default(now())
+
+  arbiter User @relation(fields: [arbiterId], references: [id])
+
+  @@index([arbiterId])
+  @@map("arbiter_payouts")
 }
 
 // At most one appeal per dispute — enforced by @unique on disputeId (#382).
@@ -1105,18 +1128,90 @@ model UnmatchedPayment {
   @@map("unmatched_payments")
 }
 
-// #504 — Recruiter portfolio of past placements
-model RecruiterPortfolioEntry {
-  id         String   @id @default(uuid())
-  recruiterId String                        // references User with role RECRUITER
-  role       String                         // job role / title placed
-  industry   String                         // e.g. "FinTech", "Healthcare"
-  year       Int                            // year placement was made
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+// ============================================================
+// MULTISIG COMPANY ESCROW ACCOUNTS (#495)
+// ============================================================
 
-  recruiter  User     @relation("RecruiterPortfolio", fields: [recruiterId], references: [id])
+enum MultisigTxStatus {
+  PENDING    // collecting signatures, below threshold
+  SUBMITTED  // threshold met and submitted to Horizon
+  FAILED     // submission to Horizon failed
+}
 
-  @@index([recruiterId])
-  @@map("recruiter_portfolio_entries")
+// One signer set + required threshold per company escrow account. A company
+// may rotate its signer set over time, so signerSets is 1:N off the owning
+// company (User) rather than embedding a fixed list on the user record.
+model CompanyEscrowSignerSet {
+  id              String   @id @default(uuid())
+  companyId       String
+  escrowAccountId String   // the Stellar account address this signer set guards
+  threshold       Int      // number of distinct signatures required before submission
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company  User                      @relation("CompanyEscrowSignerSets", fields: [companyId], references: [id], onDelete: Cascade)
+  signers  CompanyEscrowSigner[]
+  pendingTxs MultisigPendingTransaction[]
+
+  @@unique([companyId, escrowAccountId])
+  @@index([companyId])
+  @@map("company_escrow_signer_sets")
+}
+
+// A single authorized signer (public key + optional linked user) within a
+// signer set.
+model CompanyEscrowSigner {
+  id            String   @id @default(uuid())
+  signerSetId   String
+  publicKey     String   // Stellar public key (G...) authorized to sign
+  userId        String?  // optional link to a platform user who controls this key
+  createdAt     DateTime @default(now())
+
+  signerSet CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@unique([signerSetId, publicKey])
+  @@index([signerSetId])
+  @@map("company_escrow_signers")
+}
+
+// A transaction awaiting enough signatures before it is submitted to
+// Horizon. `unsignedXdr` is the base envelope every signer signs a copy of;
+// `signedCount` is a denormalized cache of distinct signers collected so
+// far, enforced via the unique constraint on MultisigSignature.
+model MultisigPendingTransaction {
+  id              String           @id @default(uuid())
+  signerSetId     String
+  unsignedXdr     String           @db.Text
+  description     String?          // human-readable context, e.g. "Release milestone payment"
+  status          MultisigTxStatus @default(PENDING)
+  submittedTxHash String?
+  errorMessage    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  signerSet  CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@index([signerSetId])
+  @@index([status])
+  @@map("multisig_pending_transactions")
+}
+
+// One row per signer per pending transaction. The unique constraint on
+// [pendingTxId, signerId] is what makes a duplicate submission from the
+// same signer a no-op rather than double-counting toward the threshold.
+model MultisigSignature {
+  id           String   @id @default(uuid())
+  pendingTxId  String
+  signerId     String
+  signedXdr    String   @db.Text // the signer's own signed copy of the envelope, from which we extract their signature
+  createdAt    DateTime @default(now())
+
+  pendingTx MultisigPendingTransaction @relation(fields: [pendingTxId], references: [id], onDelete: Cascade)
+  signer    CompanyEscrowSigner        @relation(fields: [signerId], references: [id], onDelete: Cascade)
+
+  @@unique([pendingTxId, signerId])
+  @@index([pendingTxId])
+  @@map("multisig_signatures")
 }
