@@ -12,10 +12,19 @@ export const envValidationSchema = Joi.object({
   SMTP_PASS: Joi.string().required(),
 
   PORT: Joi.number().port().default(3000),
+  CORS_ALLOWED_HEADERS: Joi.string()
+    .default(
+      'Content-Type, Authorization, Idempotency-Key, X-API-Key, If-None-Match, X-Request-Id',
+    )
+    .allow(''),
   LOG_LEVEL: Joi.string()
     .valid('error', 'warn', 'log', 'debug', 'verbose')
     .default('log'),
   NOTIFICATION_RETENTION_DAYS: Joi.number().integer().min(1).default(90),
+
+  // Idle session expiration — refresh tokens unused for longer than this
+  // window are rejected on POST /auth/refresh (defaults to 7 days).
+  IDLE_SESSION_WINDOW_DAYS: Joi.number().integer().min(1).max(365).default(7),
 
   // Password complexity policy
   PASSWORD_MIN_LENGTH: Joi.number().integer().min(6).max(128).default(8),
@@ -23,6 +32,10 @@ export const envValidationSchema = Joi.object({
   PASSWORD_REQUIRE_LOWERCASE: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(true),
   PASSWORD_REQUIRE_NUMBER: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(true),
   PASSWORD_REQUIRE_SPECIAL: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(false),
+
+  // HaveIBeenPwned breach-password check
+  // Set to 'false' to disable (e.g. in offline environments or CI without outbound HTTPS).
+  HIBP_CHECK_ENABLED: Joi.string().valid('true', 'false', '1', '0').default('true'),
 
   // Data retention windows — per category (set to -1 to disable a category)
   DATA_RETENTION_DAYS: Joi.number().integer().min(-1).default(365),
@@ -40,7 +53,13 @@ export const envValidationSchema = Joi.object({
 
   // Placement milestone due-soon reminder (#260)
   PLACEMENT_MILESTONE_REMINDER_DAYS: Joi.number().integer().min(1).max(365).default(7),
-  
+
+  // Dispute workflow (#381, #382)
+  DISPUTE_APPEAL_WINDOW_HOURS: Joi.number().integer().min(0).max(720).default(72),
+  DISPUTE_SLA_ASSIGNMENT_HOURS: Joi.number().integer().min(1).max(720).default(24),
+  DISPUTE_SLA_REVIEW_HOURS: Joi.number().integer().min(1).max(720).default(72),
+  DISPUTE_SLA_APPEAL_HOURS: Joi.number().integer().min(1).max(720).default(72),
+
   // Database connection pooling
   DATABASE_POOL_MIN: Joi.number().integer().min(1).max(20).default(2),
   DATABASE_POOL_MAX: Joi.number().integer().min(2).max(50).default(10),
@@ -55,6 +74,17 @@ export const envValidationSchema = Joi.object({
   STELLAR_BREAKER_RESET_TIMEOUT: Joi.number().integer().min(1000).max(300000).default(30000),
   STELLAR_BREAKER_ROLLING_COUNT_TIMEOUT: Joi.number().integer().min(1000).max(60000).default(10000),
   STELLAR_BREAKER_ROLLING_COUNT_BUCKETS: Joi.number().integer().min(1).max(20).default(10),
+
+  // Horizon failover
+  HORIZON_URLS: Joi.string().allow('').optional(),
+  HORIZON_FAILOVER_THRESHOLD: Joi.number().integer().min(1).max(20).default(3),
+  HORIZON_RECOVERY_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Web push / VAPID (optional, #392) — push is disabled when keys are unset.
+  // Generate a key pair with: npx web-push generate-vapid-keys
+  VAPID_PUBLIC_KEY: Joi.string().allow('').optional(),
+  VAPID_PRIVATE_KEY: Joi.string().allow('').optional(),
+  VAPID_SUBJECT: Joi.string().pattern(/^(mailto:|https:\/\/)/).allow('').optional(),
 
   // Google OAuth2 (optional)
   GOOGLE_CLIENT_ID: Joi.string().allow('').optional(),

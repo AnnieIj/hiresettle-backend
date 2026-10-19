@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Body, Param,
   Query, UseGuards, HttpCode, HttpStatus,
   Patch, Put, UseInterceptors,
-  UploadedFile,
+  UploadedFile, Delete,
 } from '@nestjs/common';
 import {
   ApiTags, ApiOperation, ApiResponse,
@@ -22,8 +22,10 @@ import { AuditLogService } from './audit-log.service';
 import { AuditLogEntryDto } from './dto/audit-log-response.dto';
 import { JwtOrApiKeyGuard } from '../../common/guards/jwt-or-api-key.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { ApiKeyScopesGuard } from '../../common/guards/api-key-scopes.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { RequireScopes, ApiKeyScope } from '../../common/decorators/api-key-scopes.decorator';
 import { UserJwtSubThrottlerGuard } from '../../common/guards/user-jwt-sub-throttler.guard';
 import { AdminUsersService } from '../admin/admin-users.service';
 import { CancelEngagementDto } from './dto/cancel-engagement.dto';
@@ -31,12 +33,19 @@ import { RequestReplacementDto } from './dto/request-replacement.dto';
 import { CreateEngagementNoteDto } from './dto/create-engagement-note.dto';
 import { SavedFiltersService } from './saved-filters.service';
 import { CreateSavedFilterDto } from './dto/create-saved-filter.dto';
+import { ActivityFeedService } from './activity-feed.service';
+import { EngagementActivityQueryDto } from './dto/engagement-activity-query.dto';
+import { CreateCommentDto } from './dto/create-comment.dto';
+import { UpdateCommentDto } from './dto/update-comment.dto';
+import { AddWatcherDto } from './dto/add-watcher.dto';
+import { UpdateCandidateDetailsDto } from './dto/update-candidate-details.dto';
 
 @ApiTags('engagements')
 @ApiBearerAuth()
 @ApiSecurity('api-key')
 @UseGuards(UserJwtSubThrottlerGuard)
 @UseGuards(JwtOrApiKeyGuard)
+@UseGuards(ApiKeyScopesGuard)
 @Throttle({ default: { limit: 100, ttl: 60 } })
 @Controller('engagements')
 export class EngagementsController {
@@ -45,11 +54,13 @@ export class EngagementsController {
     private readonly adminUsersService: AdminUsersService,
     private readonly auditLogService: AuditLogService,
     private readonly savedFiltersService: SavedFiltersService,
+    private readonly activityFeed: ActivityFeedService,
   ) {}
 
   @Post()
   @UseGuards(RolesGuard)
   @Roles(UserRole.COMPANY)
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.CREATED)
   @Idempotent()
   @UseInterceptors(IdempotencyInterceptor)
@@ -71,6 +82,7 @@ export class EngagementsController {
    * List with optional filters: search, status (single/multi), date range, pagination.
    */
   @Get()
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'List engagements with flexible filters and pagination' })
   @ApiQuery({ name: 'companyAddress', required: false, description: 'Filter by company Stellar address' })
   @ApiQuery({ name: 'recruiterAddress', required: false, description: 'Filter by recruiter Stellar address' })
@@ -125,6 +137,7 @@ export class EngagementsController {
    * Full detail — milestones, events, retention schedule.
    */
   @Get(':id')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'Get full engagement details' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
   @ApiResponse({ status: 200, description: 'Engagement retrieved' })
@@ -135,6 +148,7 @@ export class EngagementsController {
   }
 
   @Get(':id/summary')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'Get aggregated engagement summary' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
   @ApiResponse({ status: 200, description: 'Engagement summary retrieved' })
@@ -149,6 +163,7 @@ export class EngagementsController {
    * Returns the full status transition history for an engagement.
    */
   @Get(':id/audit-log')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'Get engagement audit log' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
   @ApiResponse({ status: 200, description: 'Audit log retrieved' })
@@ -162,10 +177,31 @@ export class EngagementsController {
   }
 
   /**
+   * GET /api/v1/engagements/:id/activity
+   * Merged timeline: status changes, notes, milestone audit entries, proof
+   * versions, partial releases and milestone comments (#379).
+   */
+  @Get(':id/activity')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
+  @ApiOperation({ summary: 'Engagement activity feed, newest first (participants only)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 200, description: '{ items, nextCursor }' })
+  @ApiResponse({ status: 403, description: 'Not a participant of this engagement' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  getActivity(
+    @Param('id') id: string,
+    @Query() query: EngagementActivityQueryDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.activityFeed.getActivity(id, user, query);
+  }
+
+  /**
    * POST /api/v1/engagements/:id/notes
    * Add an internal note to an engagement (participants only).
    */
   @Post(':id/notes')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Add an internal note to an engagement (participants only)' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
@@ -186,6 +222,7 @@ export class EngagementsController {
    * List internal notes on an engagement (participants only).
    */
   @Get(':id/notes')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'List internal notes on an engagement (participants only)' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
   @ApiResponse({ status: 200, description: 'Notes retrieved' })
@@ -200,10 +237,176 @@ export class EngagementsController {
   }
 
   /**
+   * POST /api/v1/engagements/:id/comments
+   * Add a comment visible to both company and recruiter (#368).
+   */
+  @Post(':id/comments')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Add a comment visible to both sides (participants only) (#368)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 201, description: 'Comment created' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not a participant of this engagement' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  createComment(
+    @Param('id') id: string,
+    @Body() dto: CreateCommentDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.createComment(id, user, dto.body);
+  }
+
+  /**
+   * GET /api/v1/engagements/:id/comments
+   * List comments on an engagement (participants only).
+   */
+  @Get(':id/comments')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
+  @ApiOperation({ summary: 'List comments on an engagement (participants only) (#368)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 200, description: 'Comments retrieved' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not a participant of this engagement' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  getComments(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.listComments(id, user);
+  }
+
+  /**
+   * PATCH /api/v1/engagements/:engagementId/comments/:commentId
+   * Edit a comment within 15 minutes of creation.
+   */
+  @Patch(':engagementId/comments/:commentId')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Edit a comment within 15 minutes (author only) (#368)' })
+  @ApiParam({ name: 'engagementId', description: 'Engagement ID' })
+  @ApiParam({ name: 'commentId', description: 'Comment ID' })
+  @ApiResponse({ status: 200, description: 'Comment updated' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Can only edit own comments within 15 minutes' })
+  @ApiResponse({ status: 404, description: 'Comment not found' })
+  updateComment(
+    @Param('commentId') commentId: string,
+    @Body() dto: UpdateCommentDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.updateComment(commentId, user, dto.body);
+  }
+
+  /**
+   * POST /api/v1/engagements/:id/watch
+   * Add a company member as a watcher for this engagement (#369).
+   */
+  @Post(':id/watch')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Add a watcher to this engagement (participants only) (#369)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 201, description: 'Watcher added' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not authorized to add watchers' })
+  @ApiResponse({ status: 404, description: 'Engagement or user not found' })
+  @ApiResponse({ status: 409, description: 'User is already watching' })
+  addWatcher(
+    @Param('id') id: string,
+    @Body() dto: AddWatcherDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.addWatcher(id, user, dto.userId);
+  }
+
+  /**
+   * DELETE /api/v1/engagements/:id/watch/:userId
+   * Remove a watcher from this engagement (#369).
+   */
+  @Delete(':id/watch/:userId')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Remove a watcher from this engagement (#369)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiParam({ name: 'userId', description: 'User ID of the watcher to remove' })
+  @ApiResponse({ status: 200, description: 'Watcher removed' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not authorized to remove watchers' })
+  @ApiResponse({ status: 404, description: 'Watcher not found' })
+  removeWatcher(
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.removeWatcher(id, user, userId);
+  }
+
+  /**
+   * GET /api/v1/engagements/:id/watchers
+   * List watchers for this engagement (#369).
+   */
+  @Get(':id/watchers')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
+  @ApiOperation({ summary: 'List watchers for this engagement (participants only) (#369)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 200, description: 'Watchers retrieved' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not a participant' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  getWatchers(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.listWatchers(id, user);
+  }
+
+  /**
+   * PUT /api/v1/engagements/:id/candidate-details
+   * Update placed candidate details (PII) (#368).
+   */
+  @Put(':id/candidate-details')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update placed candidate details (participants only) (#368)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 200, description: 'Candidate details updated' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not a participant' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  updateCandidateDetails(
+    @Param('id') id: string,
+    @Body() dto: UpdateCandidateDetailsDto,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.updateCandidateDetails(id, user, dto);
+  }
+
+  /**
+   * GET /api/v1/engagements/:id/candidate-details
+   * Get placed candidate details (participants only) (#368).
+   */
+  @Get(':id/candidate-details')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
+  @ApiOperation({ summary: 'Get placed candidate details (participants only) (#368)' })
+  @ApiParam({ name: 'id', description: 'Engagement ID' })
+  @ApiResponse({ status: 200, description: 'Candidate details retrieved' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not a participant' })
+  @ApiResponse({ status: 404, description: 'Engagement not found' })
+  getCandidateDetails(
+    @Param('id') id: string,
+    @CurrentUser() user: any,
+  ) {
+    return this.engagementsService.getCandidateDetails(id, user);
+  }
+
+  /**
    * POST /api/v1/engagements/:id/sync
    * Force re-read the engagement from the Stellar chain.
    */
   @Post(':id/sync')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Force sync engagement status from Stellar chain' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
@@ -217,6 +420,7 @@ export class EngagementsController {
   @Post(':id/recuse-arbiter')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ARBITER)
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Recuse yourself as arbiter from an engagement (ARBITER only)' })
   recuseArbiter(
@@ -227,6 +431,7 @@ export class EngagementsController {
   }
 
   @Post(':id/archive')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Archive an engagement so it is excluded from default list views' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
@@ -239,6 +444,7 @@ export class EngagementsController {
   }
 
   @Post(':id/restore')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Restore an archived engagement back into default list views' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
@@ -253,6 +459,7 @@ export class EngagementsController {
   @Get('arbiters')
   @UseGuards(RolesGuard)
   @Roles(UserRole.COMPANY, UserRole.ADMIN)
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'List all active arbiters (COMPANY and ADMIN only)' })
   listArbiters() {
     return this.adminUsersService.listArbiters();
@@ -261,6 +468,7 @@ export class EngagementsController {
   @Patch(':id/status')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN)
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @ApiOperation({ summary: 'Admin override: Force update engagement status' })
   updateEngagementStatus(
     @Param('id') id: string,
@@ -279,6 +487,7 @@ export class EngagementsController {
    * Replace the full tag set on an engagement.
    */
   @Put(':id/tags')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Replace tags on an engagement (#252)' })
   @ApiParam({ name: 'id', description: 'Engagement ID' })
@@ -300,11 +509,11 @@ export class EngagementsController {
   /**
    * POST /api/v1/engagements/import
    * Accept a multipart CSV file and create engagements in bulk.
-   * Returns a per-row result report; invalid rows are skipped without failing the whole batch.
    */
   @Post('import')
   @UseGuards(RolesGuard)
   @Roles(UserRole.COMPANY)
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(FileInterceptor('file'))
   @ApiConsumes('multipart/form-data')
@@ -328,11 +537,8 @@ export class EngagementsController {
   // SAVED FILTERS (#253)
   // ----------------------------------------------------------
 
-  /**
-   * GET /api/v1/engagements/filters
-   * List saved filter presets for the authenticated user.
-   */
   @Get('filters')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'List saved filter presets (#253)' })
   @ApiResponse({ status: 200, description: 'Saved filters retrieved' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
@@ -340,11 +546,8 @@ export class EngagementsController {
     return this.savedFiltersService.findAll(user.id);
   }
 
-  /**
-   * POST /api/v1/engagements/filters
-   * Save a named filter preset.
-   */
   @Post('filters')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Save a named filter preset (#253)' })
   @ApiResponse({ status: 201, description: 'Saved filter created' })
@@ -358,11 +561,8 @@ export class EngagementsController {
     return this.savedFiltersService.create(user.id, dto);
   }
 
-  /**
-   * DELETE /api/v1/engagements/filters/:filterId
-   * Delete a saved filter preset.
-   */
   @Post('filters/:filterId/delete')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_WRITE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a saved filter preset (#253)' })
   @ApiParam({ name: 'filterId', description: 'Saved filter ID' })
@@ -376,11 +576,8 @@ export class EngagementsController {
     return this.savedFiltersService.remove(user.id, filterId);
   }
 
-  /**
-   * GET /api/v1/engagements/filters/:filterId/apply
-   * Apply a saved filter preset — returns the engagement list as if those filters were entered manually.
-   */
   @Get('filters/:filterId/apply')
+  @RequireScopes(ApiKeyScope.ENGAGEMENTS_READ)
   @ApiOperation({ summary: 'Apply a saved filter preset and return matching engagements (#253)' })
   @ApiParam({ name: 'filterId', description: 'Saved filter ID' })
   @ApiResponse({ status: 200, description: 'Engagements matching the preset' })

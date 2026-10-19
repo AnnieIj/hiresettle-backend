@@ -51,6 +51,7 @@ Complete reference for every environment variable consumed by the HireSettle bac
 | `JWT_ACCESS_EXPIRES_IN` | No | `15m` | No | Access token lifetime (e.g., `15m`, `1h`, `30m`). Accepted by the `expiresIn` option of `JwtService.sign()`. |
 | `JWT_REFRESH_EXPIRES_IN` | No | `7d` | No | Refresh token JWT lifetime (e.g., `7d`, `30d`). Used for the `expiresIn` parameter when signing refresh tokens. |
 | `JWT_REFRESH_EXPIRES_DAYS` | No | `7` | No | Refresh token database record expiration in days. Controls when the `RefreshToken.expiresAt` date is set. |
+| `IDLE_SESSION_WINDOW_DAYS` | No | `7` | **Yes** | Refresh tokens unused for longer than this window are rejected on `POST /auth/refresh`. `RefreshToken.lastUsedAt` is updated on every refresh. Must be between 1 and 365. |
 | `SKIP_ACCOUNT_VALIDATION` | No | `false` | No | When truthy (`true` / `1`), skips the Stellar account existence check during registration. Useful for testing against a local Stellar network without pre-funded accounts. |
 | `HIRESETTLE_CONTRACT_VERSION` | No | `1` | No | Expected return value of the Soroban contract `version()` method. Startup fails if the configured contract reports a different version. |
 | `SKIP_CONTRACT_COMPATIBILITY_CHECK` | No | `false` | No | Skips the Soroban contract version check. Use only when running against a local mock contract. |
@@ -82,6 +83,16 @@ Complete reference for every environment variable consumed by the HireSettle bac
 | `SMTP_USER` | **Yes** | — | **Yes** | SMTP authentication username. |
 | `SMTP_PASS` | **Yes** | — | **Yes** | SMTP authentication password or app-specific password. See [docs/secrets.md](./secrets.md) for rotation. |
 | `EMAIL_FROM` | No | `noreply@hiresettle.com` | No | `From` address for all outgoing emails sent by `NotificationsService`. |
+
+---
+
+## Web Push (VAPID)
+
+| Variable | Required | Default | Validated at startup | Description |
+| --- | --- | --- | --- | --- |
+| `VAPID_PUBLIC_KEY` | No | — | **Yes** | VAPID public key served at `GET /notifications/push/vapid-public-key` and used by browsers as `applicationServerKey`. Generate a pair with `npx web-push generate-vapid-keys`. Web push is disabled when unset. |
+| `VAPID_PRIVATE_KEY` | No | — | **Yes** | VAPID private key used to sign push messages. Keep secret. |
+| `VAPID_SUBJECT` | No | `mailto:noreply@hiresettle.com` | **Yes** | Contact URI (`mailto:` or `https://`) sent to push services. |
 
 ---
 

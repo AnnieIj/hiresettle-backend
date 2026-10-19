@@ -36,14 +36,17 @@ export class AdminUsersService {
     const limit = dto.limit ?? 20;
     const skip = (page - 1) * limit;
 
+    const searchTerm = dto.q ?? dto.search;
     const where: Prisma.UserWhereInput = {
       ...(dto.role ? { role: dto.role } : {}),
-      ...(dto.search
+      ...(searchTerm
         ? {
             OR: [
-              { id: { contains: dto.search, mode: 'insensitive' } },
-              { name: { contains: dto.search, mode: 'insensitive' } },
-              { email: { contains: dto.search, mode: 'insensitive' } },
+              { id: { contains: searchTerm, mode: 'insensitive' } },
+              { name: { contains: searchTerm, mode: 'insensitive' } },
+              { email: { contains: searchTerm, mode: 'insensitive' } },
+              { stellarAddress: { contains: searchTerm, mode: 'insensitive' } },
+              { company: { contains: searchTerm, mode: 'insensitive' } },
             ],
           }
         : {}),
@@ -339,5 +342,24 @@ export class AdminUsersService {
       data: { rateLimitOverride: null },
       select: USER_SELECT,
     });
+  }
+
+  async setCompanyPlan(companyId: string, planId: string | null) {
+    const user = await this.prisma.user.findUnique({ where: { id: companyId } });
+    if (!user) throw new NotFoundException('User not found');
+    if (user.role !== UserRole.COMPANY) throw new BadRequestException('Only company users have plans');
+    if (planId) {
+      const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
+      if (!plan) throw new NotFoundException(`Plan ${planId} not found`);
+    }
+    return this.prisma.user.update({
+      where: { id: companyId },
+      data: { planId },
+      select: { ...USER_SELECT, planId: true },
+    });
+  }
+
+  async listPlans() {
+    return this.prisma.plan.findMany({ orderBy: { maxActiveEngagements: 'asc' } });
   }
 }

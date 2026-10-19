@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
+import { WebPushService } from './web-push.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { UserJwtSubThrottlerGuard } from '../../common/guards/user-jwt-sub-throttler.guard';
 import { NotificationType } from '@prisma/client';
@@ -16,6 +17,8 @@ describe('NotificationsController', () => {
     markAllRead: jest.fn(),
     addConnection: jest.fn(),
     removeConnection: jest.fn(),
+    getDigestPreference: jest.fn(),
+    setDigestPreference: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -25,6 +28,15 @@ describe('NotificationsController', () => {
         {
           provide: NotificationsService,
           useValue: mockNotificationsService,
+        },
+        {
+          provide: WebPushService,
+          useValue: {
+            getPublicKey: jest.fn(),
+            listForUser: jest.fn(),
+            subscribe: jest.fn(),
+            unsubscribe: jest.fn(),
+          },
         },
       ],
     })
@@ -53,7 +65,7 @@ describe('NotificationsController', () => {
 
       const result = await controller.findAll(userId, false, 1, 10);
 
-      expect(service.findForUser).toHaveBeenCalledWith(userId, false, 1, 10);
+      expect(service.findForUser).toHaveBeenCalledWith(userId, false, 1, 10, undefined);
       expect(result).toEqual({ data: notifications, meta });
     });
   });
@@ -92,6 +104,30 @@ describe('NotificationsController', () => {
 
       expect(service.markAllRead).toHaveBeenCalledWith(userId);
       expect(result).toEqual({ count: 3 });
+    });
+  });
+
+  describe('getDigestPreference', () => {
+    it('should return the digest opt-in status', async () => {
+      const userId = 'user123';
+      mockNotificationsService.getDigestPreference.mockResolvedValue({ digestEnabled: true });
+
+      const result = await controller.getDigestPreference(userId);
+
+      expect(service.getDigestPreference).toHaveBeenCalledWith(userId);
+      expect(result).toEqual({ digestEnabled: true });
+    });
+  });
+
+  describe('updateDigestPreference', () => {
+    it('should update the digest opt-in status', async () => {
+      const userId = 'user123';
+      mockNotificationsService.setDigestPreference.mockResolvedValue({ digestEnabled: false });
+
+      const result = await controller.updateDigestPreference(userId, { digestEnabled: false });
+
+      expect(service.setDigestPreference).toHaveBeenCalledWith(userId, false);
+      expect(result).toEqual({ digestEnabled: false });
     });
   });
 

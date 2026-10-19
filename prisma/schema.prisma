@@ -62,6 +62,13 @@ enum NotificationType {
   ACCOUNT_MERGE_DETECTED
   FUNDING_SHORTFALL_DETECTED
   STELLAR_BALANCE_LOW
+  DISPUTE_SLA_OVERDUE
+  DISPUTE_APPEALED
+  DISPUTE_APPEAL_DECIDED
+  DISPUTE_EVIDENCE_WINDOW_CLOSING
+  COMMENT_ADDED
+  WATCHER_ADDED
+  UNMATCHED_PAYMENT_ALERT
 }
 
 enum UserRole {
@@ -89,9 +96,53 @@ enum SecurityEventAction {
   IMPERSONATION_ISSUED
 }
 
+// Dispute lifecycle (#381, #382, #383). OPEN and UNDER_REVIEW count toward an
+// arbiter's active workload; RESOLVED means a decision is recorded and the
+// appeal window is running; CLOSED means funds have been settled.
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+// Stage drives the SLA response deadline (#381).
+enum DisputeStage {
+  ASSIGNMENT
+  ARBITER_REVIEW
+  APPEAL_REVIEW
+}
+
+enum DisputeSlaStatus {
+  ON_TRACK
+  OVERDUE
+  MET
+}
+
+enum DisputeOutcome {
+  RELEASE
+  REFUND
+}
+
+enum DisputeAppealStatus {
+  OPEN
+  DECIDED
+}
+
 // ============================================================
 // MODELS
 // ============================================================
+
+model Plan {
+  id                   String   @id
+  name                 String
+  maxActiveEngagements Int
+  createdAt            DateTime @default(now())
+
+  users User[]
+
+  @@map("plans")
+}
 
 model User {
   id             String    @id @default(uuid())
@@ -102,8 +153,10 @@ model User {
   company        String?        // company name (for COMPANY role users)
   companyOwnerId String?        // set on sub-users created via team invite; references the inviting COMPANY user's id
   role           UserRole       @default(COMPANY)
+  planId         String?        // subscription plan; null = no plan limit enforced
   webhookUrl     String?
   webhookSecret  String?        // HMAC-SHA256 signing secret, generated when webhookUrl is first set
+  timezone       String?        @default("UTC") // recipient local timezone for scheduling notifications
   rateLimitOverride Int?        // custom per-user request limit for UserJwtSubThrottlerGuard; falls back to default when unset
   avatarUrl      String?        // CDN URL for user avatar
   verifiedAt     DateTime?      // Set by an admin after company verification
@@ -119,17 +172,31 @@ model User {
   kycReviewedAt  DateTime?
   kycReviewedBy  String?        // admin userId who approved/rejected
   kycRejectionReason String?
+  locale         String         @default("en") // email template locale, falls back to English (#281)
   allowedCustomFields String[]  @default([]) // COMPANY only: permitted keys for engagement customFields
+  slackWebhookUrl String?       // Slack incoming-webhook URL for notification alerts (#277)
+  discordWebhookUrl String?     // Discord incoming-webhook URL for notification alerts (#278)
+  teamsWebhookUrl String?       // Microsoft Teams incoming-webhook URL for notification alerts (#391)
+  batchWindowSeconds Int        @default(60) // notification batching window in seconds (#279)
+  // Email change flow (#356): pending new address + HMAC token cleared after confirmation
+  pendingEmail               String?
+  emailChangeToken           String?  @unique
+  emailChangeTokenExpiresAt  DateTime?
+  // Tokenized iCal feed (#380): SHA-256 of the raw feed token; null = feed disabled
+  calendarTokenHash          String?  @unique
+  calendarTokenCreatedAt     DateTime?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
   // Relations
+  plan                 Plan?                   @relation(fields: [planId], references: [id])
   companyEngagements   Engagement[]            @relation("CompanyEngagements")
   recruiterEngagements Engagement[]            @relation("RecruiterEngagements")
   arbiterEngagements   Engagement[]            @relation("ArbiterEngagements")
   notifications        Notification[]
   refreshTokens        RefreshToken[]
   notificationPrefs    NotificationPreference[]
+  pushSubscriptions    PushSubscription[]
   milestoneAuditLogs   MilestoneAuditLog[]
   disputeEvidences     DisputeEvidence[]
   auditLogs            EngagementAuditLog[]
@@ -140,12 +207,34 @@ model User {
   idempotencyKeys      IdempotencyKey[]
   webhookDeliveries    WebhookDelivery[]
   engagementNotes      EngagementNote[]
+  engagementComments   EngagementComment[]
+  watchedEngagements   EngagementWatcher[]      @relation("EngagementWatchers")
+  addedWatchers        EngagementWatcher[]      @relation("EngagementWatcherAdders")
   apiKeys              ApiKey[]
   milestoneApprovals   MilestoneApproval[]
+  recruiterReviews     RecruiterReview[]        @relation("RecruiterReviews")
+  reviewerReviews      RecruiterReview[]        @relation("ReviewerReviews")
+  portfolioEntries     RecruiterPortfolioEntry[] @relation("RecruiterPortfolio")
+  kycDocuments         KycDocument[]
+  teamInvites          TeamInvite[]             @relation("TeamInvites")
+  savedFilters         SavedFilter[]
+  companyFavorites     FavoriteRecruiter[]      @relation("CompanyFavorites")
+  recruiterFavorites   FavoriteRecruiter[]      @relation("RecruiterFavorites")
+  companyMembers       CompanyMember[]          @relation("CompanyOwner")
+  memberOfCompanies    CompanyMember[]          @relation("MemberUser")
+  escrowSignerSets     CompanyEscrowSignerSet[] @relation("CompanyEscrowSignerSets")
+  recoveryCodes        RecoveryCode[]
+  trustedDevices       TrustedDevice[]
+  arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
+  arbiterPayouts       ArbiterPayout[]
+  arbiterRecusals      ArbiterRecusal[]
 
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
   @@index([kycStatus])
+  @@index([email])                   // #474 — admin user search by email
+  @@index([stellarAddress])          // #474 — admin user search by Stellar address
+  @@index([company])                 // #474 — admin user search by company name
   @@map("users")
 }
 
@@ -157,6 +246,7 @@ model ApiKey {
   keyHash    String    @unique
   userId     String    // owning user (usually a COMPANY account)
   companyId  String?   // optional company scope (defaults to userId for COMPANY users)
+  scopes     String[]  @default([]) // e.g. ["engagements:read","engagements:write","webhooks:manage"]
   expiresAt  DateTime?
   revokedAt  DateTime?
   lastUsedAt DateTime?
@@ -178,6 +268,7 @@ model RefreshToken {
   expiresAt  DateTime
   consumedAt DateTime?
   revokedAt  DateTime?
+  lastUsedAt DateTime?  // last activity timestamp — used to expire idle sessions
   createdAt  DateTime  @default(now())
 
   // Relations
@@ -216,6 +307,13 @@ model Engagement {
   tags             String[]          @default([])  // free-form labels for dashboard filtering (#252)
   archivedAt       DateTime?         // soft-archive timestamp — excluded from default list views
   requiredApprovals Int              @default(1) // number of distinct approvals required before a milestone can be confirmed
+  // Placed candidate details (PII) (#368)
+  candidateName     String?
+  candidateEmail    String?
+  candidatePhone    String?
+  candidateStartDate DateTime?
+  candidateRole     String?
+  placedAt          DateTime?         // when candidate was placed
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
 
@@ -228,7 +326,11 @@ model Engagement {
   events          ChainEvent[]
   auditLogs       EngagementAuditLog[]
   notes           EngagementNote[]
+  comments        EngagementComment[]
+  watchers        EngagementWatcher[]
   review          RecruiterReview?
+  disputes        Dispute[]
+  arbiterRecusals ArbiterRecusal[]
 
   @@index([status])
   @@index([companyAddress])
@@ -292,6 +394,43 @@ model EngagementNote {
   @@map("engagement_notes")
 }
 
+// Comments visible to both company and recruiter on an engagement (#368).
+// Can be edited within 15 minutes of creation.
+model EngagementComment {
+  id           String   @id @default(uuid())
+  engagementId String
+  authorId     String
+  body         String
+  editedAt     DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  author     User       @relation(fields: [authorId], references: [id])
+
+  @@index([engagementId, createdAt])
+  @@index([authorId])
+  @@map("engagement_comments")
+}
+
+// Engagement watchers — company members who receive notifications about an engagement (#369).
+model EngagementWatcher {
+  id           String   @id @default(uuid())
+  engagementId String
+  userId       String
+  addedBy      String   // user who added this watcher
+  createdAt    DateTime @default(now())
+
+  engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  user       User       @relation("EngagementWatchers", fields: [userId], references: [id], onDelete: Cascade)
+  adder      User       @relation("EngagementWatcherAdders", fields: [addedBy], references: [id])
+
+  @@unique([engagementId, userId])
+  @@index([userId])
+  @@index([engagementId])
+  @@map("engagement_watchers")
+}
+
 model EngagementAuditLog {
   id           String   @id @default(cuid())
   engagementId String
@@ -335,6 +474,8 @@ model Milestone {
   milestoneAuditLogs MilestoneAuditLog[]
   disputeEvidences   DisputeEvidence[]
   approvals          MilestoneApproval[]
+  refunds            Refund[]
+  disputes           Dispute[]
 
   @@unique([engagementId, milestoneIndex])
   @@index([status])
@@ -373,16 +514,39 @@ model SystemConfig {
 }
 
 enum WebhookDeliveryStatus {
+  SUCCEEDED
   FAILED
   RESENT
 }
 
+enum RefundStatus {
+  PENDING
+  COMPLETED
+}
+
+model Refund {
+  id             String       @id @default(uuid())
+  milestoneId    String       @unique
+  amount         BigInt
+  status         RefundStatus @default(PENDING)
+  reason         String?
+  providerEventId String?      @unique
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@map("refunds")
+}
+
 // Webhook subscriptions managed per-company via the API.
 model WebhookSubscription {
-  id        String   @id @default(uuid())
-  companyId String
-  url       String
-  createdAt DateTime @default(now())
+  id         String   @id @default(uuid())
+  companyId  String
+  url        String
+  eventTypes String[] @default([]) // empty = all events; non-empty = only matching event types (#275)
+  createdAt  DateTime @default(now())
 
   @@index([companyId])
   @@map("webhook_subscriptions")
@@ -390,24 +554,29 @@ model WebhookSubscription {
 
 // Recorded when a webhook job exhausts its retry attempts, so failures are
 // tracked instead of silently dropped. Admins can resend from here.
+// Subscription deliveries are also logged on success so companies can audit
+// them via GET /webhooks/subscriptions/:id/deliveries (#397).
 model WebhookDelivery {
-  id           String                @id @default(uuid())
-  userId       String?
-  url          String
-  event        String
-  payload      Json
-  attempts     Int
-  errorMessage String?
-  status       WebhookDeliveryStatus @default(FAILED)
-  resendCount  Int                   @default(0)
-  lastResendAt DateTime?
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
+  id             String                @id @default(uuid())
+  userId         String?
+  subscriptionId String?               // set when the delivery targeted a WebhookSubscription (#397)
+  url            String
+  event          String
+  payload        Json
+  attempts       Int
+  responseCode   Int?                  // HTTP status returned by the receiver, null on network errors (#397)
+  errorMessage   String?
+  status         WebhookDeliveryStatus @default(FAILED)
+  resendCount    Int                   @default(0)
+  lastResendAt   DateTime?
+  createdAt      DateTime              @default(now())
+  updatedAt      DateTime              @updatedAt
 
   user User? @relation(fields: [userId], references: [id])
 
   @@index([status])
   @@index([userId])
+  @@index([subscriptionId, createdAt])
   @@map("webhook_deliveries")
 }
 
@@ -437,12 +606,32 @@ model NotificationPreference {
   emailEnabled Boolean          @default(true)
   inAppEnabled Boolean          @default(true)
   sseEnabled   Boolean          @default(true)
+  pushEnabled  Boolean          @default(true) // browser web push (#392)
 
   user User @relation(fields: [userId], references: [id])
 
   @@unique([userId, type])
   @@index([userId])
   @@map("notification_preferences")
+}
+
+// Browser web push subscriptions (VAPID) registered per device (#392).
+// Rows are removed automatically when the push service reports them gone.
+model PushSubscription {
+  id         String    @id @default(uuid())
+  userId     String
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
 }
 
 model Notification {
@@ -475,6 +664,9 @@ model EngagementTemplate {
   milestoneConfig Json
   currentVersion  Int      @default(1)
   archived        Boolean  @default(false)
+  usageCount      Int      @default(0)
+  lastUsedAt      DateTime?
+  isPublic        Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -482,6 +674,7 @@ model EngagementTemplate {
   versions EngagementTemplateVersion[]
 
   @@index([companyId])
+  @@index([isPublic])
   @@map("engagement_templates")
 }
 
@@ -550,6 +743,8 @@ model MilestoneAuditLog {
   fromStatus  MilestoneStatus
   toStatus    MilestoneStatus
   changedBy   String
+  action      String?       // e.g. PARTIAL_RELEASE_EXECUTED (#378)
+  details     Json?         // structured breakdown, e.g. amounts and txHash
   createdAt   DateTime      @default(now())
 
   milestone   Milestone     @relation(fields: [milestoneId], references: [id])
@@ -667,6 +862,23 @@ model SavedFilter {
   @@map("saved_filters")
 }
 
+// Groups same-type notifications for the same user within a batching window
+// so multiple rapid-fire events produce a single delivery (#279).
+model NotificationBatch {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  count     Int              @default(1)
+  firstData Json?            // data from the first event in the batch
+  flushedAt DateTime?        // set when the batch has been delivered
+  expiresAt DateTime         // end of the batching window
+  createdAt DateTime         @default(now())
+
+  @@index([userId, type, flushedAt])
+  @@index([expiresAt])
+  @@map("notification_batches")
+}
+
 // Caches responses for requests submitted with an Idempotency-Key header so
 // retried requests (e.g. after a network failure) return the original
 // response instead of creating a duplicate record.
@@ -718,4 +930,288 @@ model CompanyMember {
   @@index([companyId])
   @@index([memberId])
   @@map("company_members")
+}
+
+model FeatureFlag {
+  name        String   @id
+  isEnabled   Boolean  @default(false)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("feature_flags")
+}
+
+// Two-step company ownership transfer (#360).
+// The current owner initiates; the proposed new owner must accept within 7 days.
+// Acceptance atomically reassigns CompanyMember roles and writes an AuditLog entry.
+model OwnershipTransfer {
+  id          String    @id @default(uuid())
+  companyId   String                // the User.id of the company owner record
+  fromOwnerId String                // current owner's User.id
+  toMemberId  String                // proposed new owner's User.id (must be a CompanyMember)
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  cancelledAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([companyId])
+  @@index([toMemberId])
+  @@map("ownership_transfers")
+}
+
+// A single-use backup code for a 2FA-enabled account.
+// The raw code is shown once at generation time; only the SHA-256 hash is stored.
+model RecoveryCode {
+  id       String    @id @default(uuid())
+  userId   String
+  codeHash String // SHA-256 of the raw recovery code
+  usedAt   DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+// A device that has been trusted after a successful 2FA login.
+// While the record is active (revokedAt null, expiresAt in the future) the device
+// can skip 2FA on subsequent logins.  The raw token is shown once to the client;
+// only the SHA-256 hash is stored.
+model TrustedDevice {
+  id         String    @id @default(uuid())
+  userId     String
+  tokenHash  String    @unique // SHA-256 of the raw trusted-device token
+  name       String?           // optional human-readable label (e.g. browser user-agent)
+  lastUsedAt DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("trusted_devices")
+}
+
+// A dispute raised on a milestone (#381, #382, #383). One milestone can be
+// disputed more than once over its life, but only one dispute is active at a time.
+model Dispute {
+  id                      String           @id @default(uuid())
+  engagementId            String
+  milestoneId             String
+  raisedById              String?
+  reason                  String?
+  status                  DisputeStatus    @default(OPEN)
+  stage                   DisputeStage     @default(ASSIGNMENT)
+  arbiterId               String?
+  arbiterAssignedAt       DateTime?
+  arbiterManuallyAssigned Boolean          @default(false) // admin override wins over auto-assignment (#383)
+  responseDeadline        DateTime?        // SLA deadline for the current stage (#381)
+  slaStatus               DisputeSlaStatus @default(ON_TRACK)
+  slaEscalatedAt          DateTime?        // set when admins were notified about an overdue dispute
+  outcome                 DisputeOutcome?
+  resolvedAt              DateTime?
+  appealDeadline          DateTime?        // resolvedAt + appeal window; funds stay in escrow until then (#382)
+  fundsLocked             Boolean          @default(true)
+  fundsReleasedAt         DateTime?
+  isFinal                 Boolean          @default(false)
+  evidenceDeadline        DateTime?        // deadline for either party to upload evidence (#499)
+  evidenceDeadlineWarnedAt DateTime?       // set once both parties were warned the evidence window is closing
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+
+  engagement Engagement     @relation(fields: [engagementId], references: [id])
+  milestone  Milestone      @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  arbiter    User?          @relation("DisputeArbiter", fields: [arbiterId], references: [id])
+  appeal     DisputeAppeal?
+
+  @@index([milestoneId, status])
+  @@index([engagementId])
+  @@index([arbiterId, status])
+  @@index([status, slaStatus, responseDeadline])
+  @@index([status, appealDeadline])
+  @@index([status, evidenceDeadline])
+  @@map("disputes")
+}
+
+// Records the arbiter fee deducted on dispute resolution (#500). One row per
+// settled dispute; the fee is held back from the amount released on-chain.
+model ArbiterPayout {
+  id         String   @id @default(uuid())
+  disputeId  String   @unique
+  arbiterId  String
+  feeType    String   // "FLAT" or "PERCENT", snapshot of config at resolution time
+  feeValue   Decimal  // snapshot of the configured flat amount or percent
+  amount     BigInt   // computed payout amount, in stroops
+  createdAt  DateTime @default(now())
+
+  arbiter User @relation(fields: [arbiterId], references: [id])
+
+  @@index([arbiterId])
+  @@map("arbiter_payouts")
+}
+
+// At most one appeal per dispute — enforced by @unique on disputeId (#382).
+model DisputeAppeal {
+  id                String              @id @default(uuid())
+  disputeId         String              @unique
+  appellantId       String
+  reason            String
+  originalArbiterId String?
+  arbiterId         String?
+  originalOutcome   DisputeOutcome
+  status            DisputeAppealStatus @default(OPEN)
+  outcome           DisputeOutcome?
+  isFinal           Boolean             @default(false)
+  decidedAt         DateTime?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  dispute Dispute @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+
+  @@index([arbiterId])
+  @@map("dispute_appeals")
+}
+
+// Persisted arbiter recusals; recused arbiters are excluded from auto-assignment
+// for that engagement (#383).
+model ArbiterRecusal {
+  id           String   @id @default(uuid())
+  engagementId String
+  arbiterId    String
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  engagement Engagement @relation(fields: [engagementId], references: [id], onDelete: Cascade)
+  arbiter    User       @relation(fields: [arbiterId], references: [id], onDelete: Cascade)
+
+  @@unique([engagementId, arbiterId])
+  @@index([arbiterId])
+  @@map("arbiter_recusals")
+}
+
+// ============================================================
+// UNMATCHED PAYMENTS — incoming Stellar deposits that could not
+// be reconciled to an engagement (wrong or missing memo).
+// ============================================================
+
+enum UnmatchedPaymentStatus {
+  PENDING   // awaiting admin review
+  MATCHED   // admin manually linked to an engagement
+  REFUNDED  // admin marked as refunded off-platform
+  IGNORED   // admin dismissed (e.g. known spam)
+}
+
+model UnmatchedPayment {
+  id                   String                 @id @default(uuid())
+  txHash               String                 @unique
+  sender               String                 // Stellar account that sent the payment
+  assetCode            String                 // e.g. "USDC"
+  assetIssuer          String?                // issuer account; null for native XLM
+  amount               String                 // human-readable amount from Horizon
+  memo                 String?                // raw memo value; null if absent
+  memoType             String?                // 'text' | 'id' | 'hash' | 'return' | null
+  ledger               Int                    @default(0)
+  status               UnmatchedPaymentStatus @default(PENDING)
+  matchedEngagementId  String?                // set when admin manually matches
+  resolvedBy           String?                // admin userId who resolved
+  resolvedAt           DateTime?
+  notes                String?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+
+  @@index([status])
+  @@index([sender])
+  @@index([createdAt])
+  @@map("unmatched_payments")
+}
+
+// ============================================================
+// MULTISIG COMPANY ESCROW ACCOUNTS (#495)
+// ============================================================
+
+enum MultisigTxStatus {
+  PENDING    // collecting signatures, below threshold
+  SUBMITTED  // threshold met and submitted to Horizon
+  FAILED     // submission to Horizon failed
+}
+
+// One signer set + required threshold per company escrow account. A company
+// may rotate its signer set over time, so signerSets is 1:N off the owning
+// company (User) rather than embedding a fixed list on the user record.
+model CompanyEscrowSignerSet {
+  id              String   @id @default(uuid())
+  companyId       String
+  escrowAccountId String   // the Stellar account address this signer set guards
+  threshold       Int      // number of distinct signatures required before submission
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  company  User                      @relation("CompanyEscrowSignerSets", fields: [companyId], references: [id], onDelete: Cascade)
+  signers  CompanyEscrowSigner[]
+  pendingTxs MultisigPendingTransaction[]
+
+  @@unique([companyId, escrowAccountId])
+  @@index([companyId])
+  @@map("company_escrow_signer_sets")
+}
+
+// A single authorized signer (public key + optional linked user) within a
+// signer set.
+model CompanyEscrowSigner {
+  id            String   @id @default(uuid())
+  signerSetId   String
+  publicKey     String   // Stellar public key (G...) authorized to sign
+  userId        String?  // optional link to a platform user who controls this key
+  createdAt     DateTime @default(now())
+
+  signerSet CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@unique([signerSetId, publicKey])
+  @@index([signerSetId])
+  @@map("company_escrow_signers")
+}
+
+// A transaction awaiting enough signatures before it is submitted to
+// Horizon. `unsignedXdr` is the base envelope every signer signs a copy of;
+// `signedCount` is a denormalized cache of distinct signers collected so
+// far, enforced via the unique constraint on MultisigSignature.
+model MultisigPendingTransaction {
+  id              String           @id @default(uuid())
+  signerSetId     String
+  unsignedXdr     String           @db.Text
+  description     String?          // human-readable context, e.g. "Release milestone payment"
+  status          MultisigTxStatus @default(PENDING)
+  submittedTxHash String?
+  errorMessage    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  signerSet  CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@index([signerSetId])
+  @@index([status])
+  @@map("multisig_pending_transactions")
+}
+
+// One row per signer per pending transaction. The unique constraint on
+// [pendingTxId, signerId] is what makes a duplicate submission from the
+// same signer a no-op rather than double-counting toward the threshold.
+model MultisigSignature {
+  id           String   @id @default(uuid())
+  pendingTxId  String
+  signerId     String
+  signedXdr    String   @db.Text // the signer's own signed copy of the envelope, from which we extract their signature
+  createdAt    DateTime @default(now())
+
+  pendingTx MultisigPendingTransaction @relation(fields: [pendingTxId], references: [id], onDelete: Cascade)
+  signer    CompanyEscrowSigner        @relation(fields: [signerId], references: [id], onDelete: Cascade)
+
+  @@unique([pendingTxId, signerId])
+  @@index([pendingTxId])
+  @@map("multisig_signatures")
 }

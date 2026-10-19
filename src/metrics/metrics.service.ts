@@ -61,6 +61,44 @@ export class MetricsService {
     registers: [this.registry],
   });
 
+  // ----------------------------------------------------------
+  // Reconciliation metrics
+  // ----------------------------------------------------------
+
+  readonly reconciliationCheckedTotal = new Gauge({
+    name: 'reconciliation_checked_total',
+    help: 'Total active engagements checked in the last reconciliation run',
+    registers: [this.registry],
+  });
+
+  readonly reconciliationMismatchedTotal = new Gauge({
+    name: 'reconciliation_mismatched_total',
+    help: 'Total engagements with on-chain/off-chain drift in the last reconciliation run',
+    registers: [this.registry],
+  });
+
+  readonly reconciliationLastRunTimestamp = new Gauge({
+    name: 'reconciliation_last_run_timestamp_seconds',
+    help: 'Unix timestamp of the most recent reconciliation run',
+    registers: [this.registry],
+  });
+
+  // ----------------------------------------------------------
+  // Unmatched payment metrics
+  // ----------------------------------------------------------
+
+  readonly unmatchedPaymentsPending = new Gauge({
+    name: 'unmatched_payments_pending_total',
+    help: 'Number of incoming Stellar payments currently pending admin review',
+    registers: [this.registry],
+  });
+
+  readonly unmatchedPaymentsTotal = new Counter({
+    name: 'unmatched_payments_detected_total',
+    help: 'Cumulative incoming Stellar payments that could not be matched to an engagement',
+    registers: [this.registry],
+  });
+
   constructor() {
     collectDefaultMetrics({ register: this.registry });
     // Initialize circuit breaker state to closed

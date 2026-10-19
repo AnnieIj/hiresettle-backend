@@ -10,6 +10,7 @@ import { EngagementTemplatesService } from './engagement-templates.service';
 import { CreateEngagementTemplateDto } from './dto/create-engagement-template.dto';
 import { UpdateEngagementTemplateDto } from './dto/update-engagement-template.dto';
 import { CloneEngagementTemplateDto } from './dto/clone-engagement-template.dto';
+import { AdoptEngagementTemplateDto } from './dto/adopt-engagement-template.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -49,6 +50,15 @@ export class EngagementTemplatesController {
   @ApiOperation({ summary: 'List all templates for the current company' })
   findAll(@CurrentUser() user: User) {
     return this.templatesService.findAll(user.id);
+  }
+
+  // Issue #263 — Browse public templates published by other companies (read-only, no PII)
+  @Get('browse')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.COMPANY)
+  @ApiOperation({ summary: 'Browse public templates published by other companies (#263)' })
+  browsePublic(@CurrentUser() user: User) {
+    return this.templatesService.browsePublic(user.id);
   }
 
   @Get(':id')
@@ -103,6 +113,23 @@ export class EngagementTemplatesController {
     return this.templatesService.clone(id, user.id, dto?.name);
   }
 
+  // Issue #263 — Adopt a public template into the requester's own templates
+  @Post(':id/adopt')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.COMPANY)
+  @HttpCode(HttpStatus.CREATED)
+  @Idempotent()
+  @UseInterceptors(IdempotencyInterceptor)
+  @ApiOperation({ summary: 'Adopt a public template into the requester\'s own templates (#263)' })
+  @ApiResponse({ status: 404, description: 'Public template not found' })
+  adopt(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() dto: AdoptEngagementTemplateDto,
+  ) {
+    return this.templatesService.adopt(id, user.id, dto?.name);
+  }
+
   @Delete(':id')
   @UseGuards(RolesGuard)
   @Roles(UserRole.COMPANY)
@@ -113,5 +140,48 @@ export class EngagementTemplatesController {
     @Param('id') id: string,
   ) {
     return this.templatesService.remove(id, user.id);
+  }
+
+  // Issue #265 — Template usage analytics
+  @Get(':id/stats')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.COMPANY)
+  @ApiOperation({ summary: 'Get usage stats for a template (usageCount, lastUsedAt) (#265)' })
+  @ApiResponse({ status: 200, description: 'Stats retrieved' })
+  @ApiResponse({ status: 404, description: 'Template not found' })
+  getStats(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    return this.templatesService.getStats(id, user.id);
+  }
+
+  // Issue #264 — Template export
+  @Get(':id/export')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.COMPANY)
+  @ApiOperation({ summary: 'Export a template as portable JSON (#264)' })
+  @ApiResponse({ status: 200, description: 'Template JSON' })
+  @ApiResponse({ status: 404, description: 'Template not found' })
+  exportTemplate(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+  ) {
+    return this.templatesService.exportTemplate(id, user.id);
+  }
+
+  // Issue #264 — Template import
+  @Post('import')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.COMPANY)
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Import a template from portable JSON (#264)' })
+  @ApiResponse({ status: 201, description: 'Template created from import' })
+  @ApiResponse({ status: 400, description: 'Invalid import payload' })
+  importTemplate(
+    @CurrentUser() user: User,
+    @Body() payload: Record<string, unknown>,
+  ) {
+    return this.templatesService.importTemplate(user.id, payload);
   }
 }

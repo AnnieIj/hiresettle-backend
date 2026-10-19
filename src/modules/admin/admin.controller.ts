@@ -13,6 +13,7 @@ import {
   HttpStatus,
   Res,
   Req,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -30,6 +31,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { AdminUsersService } from './admin-users.service';
 import { AdminDeadLetterService } from './admin-dead-letter.service';
 import { AdminReportsService } from './admin-reports.service';
+import { AdminDisputeStatsService } from './admin-dispute-stats.service';
 import { StellarMergeDetectorService } from './stellar-merge-detector.service';
 import { AdminAuditLogsService } from './admin-audit-logs.service';
 import { AdminWebhooksService } from './admin-webhooks.service';
@@ -45,6 +47,14 @@ import { GdprService } from '../users/gdpr.service';
 import { AuthService, RequestMeta } from '../auth/auth.service';
 import { ApiKeysService } from '../auth/api-keys.service';
 import { CreateApiKeyDto } from '../auth/dto/create-api-key.dto';
+import { PrismaService } from '../../common/prisma/prisma.service';
+import { ArbiterAssignmentService } from '../disputes/arbiter-assignment.service';
+import { ReconciliationService } from './reconciliation.service';
+import { UnmatchedPaymentsService } from './unmatched-payments.service';
+import { IncomingPaymentPollerService } from './incoming-payment-poller.service';
+import { MatchPaymentDto, RefundPaymentDto, IgnorePaymentDto } from './unmatched-payments.service';
+
+import { SetCompanyPlanDto } from './dto/set-company-plan.dto';
 
 @ApiTags('admin')
 @ApiBearerAuth()
@@ -64,7 +74,27 @@ export class AdminController {
     private readonly adminWebhooks: AdminWebhooksService,
     private readonly authService: AuthService,
     private readonly apiKeys: ApiKeysService,
+    private readonly prisma: PrismaService,
+    private readonly disputeStats: AdminDisputeStatsService,
+    private readonly arbiterAssignment: ArbiterAssignmentService,
+    private readonly reconciliation: ReconciliationService,
+    private readonly unmatchedPayments: UnmatchedPaymentsService,
+    private readonly paymentPoller: IncomingPaymentPollerService,
   ) {}
+
+  @Get('disputes/stats')
+  @ApiOperation({ summary: 'Dispute statistics: counts, resolution time, outcomes, arbiters (admin only)' })
+  @ApiQuery({ name: 'startDate', required: false, description: 'ISO date — include disputes opened on/after' })
+  @ApiQuery({ name: 'endDate', required: false, description: 'ISO date — include disputes opened on/before' })
+  getDisputeStats(@Query('startDate') startDate?: string, @Query('endDate') endDate?: string) {
+    const parse = (v?: string) => {
+      if (!v) return undefined;
+      const d = new Date(v);
+      if (isNaN(d.getTime())) throw new BadRequestException(`Invalid date: ${v}`);
+      return d;
+    };
+    return this.disputeStats.getStats(parse(startDate), parse(endDate));
+  }
 
   @Get('maintenance-mode')
   @ApiOperation({ summary: 'Get API maintenance mode status (admin only)' })
@@ -142,9 +172,14 @@ export class AdminController {
   }
 
   @Patch('engagements/:id/arbiter')
-  @ApiOperation({ summary: 'Assign or reassign an arbiter to an engagement' })
-  assignArbiter(@Param('id') id: string, @Body() dto: AssignArbiterDto) {
-    return this.adminUsers.assignArbiter(id, dto.arbiterId);
+  @ApiOperation({
+    summary: 'Assign or reassign an arbiter to an engagement',
+    description: "Also pins the engagement's active disputes to this arbiter; manual assignments take precedence over auto-assignment.",
+  })
+  async assignArbiter(@Param('id') id: string, @Body() dto: AssignArbiterDto) {
+    const updated = await this.adminUsers.assignArbiter(id, dto.arbiterId);
+    await this.arbiterAssignment.applyManualOverride(id, dto.arbiterId);
+    return updated;
   }
 
   @Get('arbiters')
@@ -379,6 +414,44 @@ export class AdminController {
     return this.adminWebhooks.resendDelivery(id, (req.user as any)?.id);
   }
 
+  @Get('refunds')
+  @ApiOperation({ summary: 'List refund records for resolved company-favoring disputes' })
+  @ApiResponse({ status: 200, description: 'Refund records retrieved' })
+  async listRefunds(@Query('status') status?: string) {
+    const where = status ? { status: status.toUpperCase() as any } : {};
+    return this.prisma.refund.findMany({
+      where,
+      include: { milestone: { select: { id: true, engagementId: true, milestoneIndex: true, amount: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  @Post('refunds/:id/complete')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark a refund as completed' })
+  @ApiResponse({ status: 200, description: 'Refund updated' })
+  @ApiResponse({ status: 404, description: 'Refund not found' })
+  async completeRefund(@Param('id') id: string) {
+    return this.prisma.refund.update({
+      where: { id },
+      data: { status: 'COMPLETED' },
+    });
+  }
+
+  @Post('disputes/:id/refund')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Record a refund for a dispute resolved in favor of the company' })
+  @ApiResponse({ status: 201, description: 'Refund recorded' })
+  async createDisputeRefund(@Param('id') id: string, @Body() dto?: { amount?: number | string; reason?: string }) {
+    const milestone = await this.prisma.milestone.findUnique({ where: { id } });
+    if (!milestone) throw new Error('Milestone not found');
+    return this.prisma.refund.upsert({
+      where: { milestoneId: milestone.id },
+      update: { amount: BigInt(dto?.amount ?? milestone.amount ?? 0), status: 'PENDING', reason: dto?.reason ?? 'Dispute resolved in favor of the company' },
+      create: { milestoneId: milestone.id, amount: BigInt(dto?.amount ?? milestone.amount ?? 0), status: 'PENDING', reason: dto?.reason ?? 'Dispute resolved in favor of the company' },
+    });
+  }
+
   // ────────────────────────────────────────────────────────────────
   // Issue #177 — Per-user rate-limit override
   // ────────────────────────────────────────────────────────────────
@@ -436,5 +509,137 @@ export class AdminController {
   @ApiResponse({ status: 404, description: 'API key not found' })
   revokeApiKey(@Param('id') id: string) {
     return this.apiKeys.revoke(id);
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Issue #267 — Tiered subscription billing plans
+  // ────────────────────────────────────────────────────────────────
+
+  @Get('plans')
+  @ApiOperation({ summary: 'List all available subscription plans (ADMIN only)' })
+  @ApiResponse({ status: 200, description: 'Plans list' })
+  listPlans() {
+    return this.adminUsers.listPlans();
+  }
+
+  @Put('users/:id/plan')
+  @ApiOperation({ summary: "Set or clear a company's subscription plan (ADMIN only)" })
+  @ApiParam({ name: 'id', description: 'Company user ID' })
+  @ApiResponse({ status: 200, description: 'Plan updated' })
+  @ApiResponse({ status: 400, description: 'User is not a company' })
+  @ApiResponse({ status: 404, description: 'User or plan not found' })
+  setCompanyPlan(@Param('id') id: string, @Body() dto: SetCompanyPlanDto) {
+    return this.adminUsers.setCompanyPlan(id, dto.planId ?? null);
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Nightly on-chain/off-chain reconciliation
+  // ────────────────────────────────────────────────────────────────
+
+  @Get('reconciliation/report')
+  @ApiOperation({
+    summary:
+      'Get the latest reconciliation report comparing DB escrow state with Stellar contract state (ADMIN only). ' +
+      'Does not auto-fix any drift — read-only.',
+  })
+  @ApiResponse({ status: 200, description: 'Reconciliation report from the most recent run' })
+  @ApiResponse({ status: 404, description: 'No reconciliation has been run yet' })
+  getReconciliationReport() {
+    const report = this.reconciliation.getLastReport();
+    if (!report) {
+      return { message: 'No reconciliation report available yet. Run POST /admin/reconciliation/run to generate one.' };
+    }
+    return report;
+  }
+
+  @Post('reconciliation/run')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Trigger an on-demand reconciliation run (ADMIN only). ' +
+      'Compares DB escrow state with Stellar contract state for all active engagements. ' +
+      'Does not auto-fix any drift.',
+  })
+  @ApiResponse({ status: 200, description: 'Reconciliation complete — report returned' })
+  async triggerReconciliation() {
+    return this.reconciliation.runReconciliation();
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Unmatched incoming Stellar payments
+  // ────────────────────────────────────────────────────────────────
+
+  @Get('unmatched-payments')
+  @ApiOperation({ summary: 'List incoming Stellar payments that could not be matched to an engagement (ADMIN only)' })
+  @ApiQuery({ name: 'status', required: false, enum: ['PENDING', 'MATCHED', 'REFUNDED', 'IGNORED'], description: 'Filter by review status' })
+  @ApiQuery({ name: 'page', required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiResponse({ status: 200, description: 'Unmatched payments list' })
+  listUnmatchedPayments(
+    @Query('status') status?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    return this.unmatchedPayments.list(status as any, Number(page) || 1, Number(limit) || 20);
+  }
+
+  @Get('unmatched-payments/:id')
+  @ApiOperation({ summary: 'Get a single unmatched payment record (ADMIN only)' })
+  @ApiParam({ name: 'id', description: 'UnmatchedPayment ID' })
+  @ApiResponse({ status: 200, description: 'Unmatched payment record' })
+  @ApiResponse({ status: 404, description: 'Not found' })
+  getUnmatchedPayment(@Param('id') id: string) {
+    return this.unmatchedPayments.findOne(id);
+  }
+
+  @Post('unmatched-payments/:id/match')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Manually match an unmatched payment to an engagement (ADMIN only)' })
+  @ApiParam({ name: 'id', description: 'UnmatchedPayment ID' })
+  @ApiResponse({ status: 200, description: 'Payment matched to engagement' })
+  @ApiResponse({ status: 404, description: 'Payment or engagement not found' })
+  @ApiResponse({ status: 409, description: 'Payment is not in PENDING status' })
+  matchUnmatchedPayment(
+    @Param('id') id: string,
+    @Body() dto: MatchPaymentDto,
+    @Req() req: Request,
+  ) {
+    return this.unmatchedPayments.match(id, (req as any).user?.id, dto);
+  }
+
+  @Post('unmatched-payments/:id/refund')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark an unmatched payment as refunded off-platform (ADMIN only)' })
+  @ApiParam({ name: 'id', description: 'UnmatchedPayment ID' })
+  @ApiResponse({ status: 200, description: 'Payment marked as refunded' })
+  @ApiResponse({ status: 409, description: 'Payment is not in PENDING status' })
+  refundUnmatchedPayment(
+    @Param('id') id: string,
+    @Body() dto: RefundPaymentDto,
+    @Req() req: Request,
+  ) {
+    return this.unmatchedPayments.refund(id, (req as any).user?.id, dto);
+  }
+
+  @Post('unmatched-payments/:id/ignore')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Dismiss an unmatched payment (e.g. dust/spam) — sets status to IGNORED (ADMIN only)' })
+  @ApiParam({ name: 'id', description: 'UnmatchedPayment ID' })
+  @ApiResponse({ status: 200, description: 'Payment ignored' })
+  @ApiResponse({ status: 409, description: 'Payment is not in PENDING status' })
+  ignoreUnmatchedPayment(
+    @Param('id') id: string,
+    @Body() dto: IgnorePaymentDto,
+    @Req() req: Request,
+  ) {
+    return this.unmatchedPayments.ignore(id, (req as any).user?.id, dto);
+  }
+
+  @Post('unmatched-payments/poll')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Trigger an on-demand Horizon payment poll (ADMIN only)' })
+  @ApiResponse({ status: 200, description: 'Poll complete — returns { checked, unmatched }' })
+  triggerPaymentPoll() {
+    return this.paymentPoller.poll();
   }
 }
