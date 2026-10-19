@@ -3,14 +3,18 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { UserRole } from '@prisma/client';
 import { RecruitersService } from './recruiters.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { buildUser } from '../../../../test/factories';
 
-const makeRecruiter = (overrides: Partial<{ id: string; name: string }> = {}) => ({
-  id: overrides.id ?? 'rec-1',
-  name: overrides.name ?? 'Alice Smith',
-  stellarAddress: 'GABC123',
-  avatarUrl: null,
-  createdAt: new Date('2026-01-01'),
-});
+const makeRecruiter = (overrides: Partial<{ id: string; name: string }> = {}) => {
+  const u = buildUser({ role: UserRole.RECRUITER, ...overrides });
+  return {
+    id: u.id,
+    name: u.name ?? 'Alice Smith',
+    stellarAddress: u.stellarAddress ?? 'GABC123',
+    avatarUrl: u.avatarUrl,
+    createdAt: u.createdAt,
+  };
+};
 
 const mockPrisma = {
   user: { findMany: jest.fn(), count: jest.fn() },
