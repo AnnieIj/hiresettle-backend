@@ -18,6 +18,7 @@ import { DisputesModule } from '../disputes/disputes.module';
 import { ReconciliationService } from './reconciliation.service';
 import { IncomingPaymentPollerService } from './incoming-payment-poller.service';
 import { UnmatchedPaymentsService } from './unmatched-payments.service';
+import { AdminPermissionsGuard } from '../../common/guards/admin-permissions.guard';
 
 @Module({
   imports: [NotificationsModule, PrismaModule, UsersModule, WebhooksModule, AuthModule, MaintenanceModeModule, DisputesModule],
@@ -34,6 +35,7 @@ import { UnmatchedPaymentsService } from './unmatched-payments.service';
     ReconciliationService,
     IncomingPaymentPollerService,
     UnmatchedPaymentsService,
+    AdminPermissionsGuard,
   ],
   exports: [AdminUsersService],
 })
