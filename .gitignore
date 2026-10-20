@@ -7,3 +7,6 @@ coverage/
 
 # Temporary OpenAPI spec produced during CI diff — never commit this file
 docs/openapi.head.json
+
+# Local changes summary (not for VCS)
+CHANGES.md

@@ -157,23 +157,47 @@ export class BillingService {
     };
   }
 
-  chargePlatformFee(
+  /**
+   * Charge a platform fee (minor units). Prepaid credits are applied first
+   * (#507); only the uncovered remainder goes to the external payment
+   * method. `feeReference` makes the credit deduction idempotent, so a
+   * retried charge never consumes credit twice.
+   */
+  async chargePlatformFee(
     companyId: string,
     amount: number | bigint,
     paymentMethod = "saved_method",
+    feeReference = `fee_${Date.now()}`,
   ) {
-    const numericAmount = typeof amount === "bigint" ? Number(amount) : amount;
-    const status =
-      Number.isFinite(numericAmount) && numericAmount > 0
-        ? "succeeded"
-        : "failed";
+    const feeAmount = toMinorUnits(amount);
+    if (feeAmount <= 0n) {
+      return {
+        companyId,
+        paymentMethod,
+        amount: feeAmount.toString(),
+        creditApplied: "0",
+        amountCharged: "0",
+        creditBalance: (await this.credits.getBalance(companyId)).toString(),
+        status: "failed" as const,
+        chargeId: null,
+        retryable: true,
+      };
+    }
+
+    const credit = await this.credits.applyToFee(companyId, feeAmount, feeReference);
+    // Fully covered by credit: nothing is sent to the payment processor.
+    const chargeId = credit.amountDue > 0n ? `ch_${Date.now()}` : null;
+
     return {
       companyId,
-      paymentMethod,
-      amount: String(numericAmount),
-      status,
-      chargeId: `ch_${Date.now()}`,
-      retryable: status === "failed",
+      paymentMethod: credit.amountDue > 0n ? paymentMethod : "prepaid_credit",
+      amount: feeAmount.toString(),
+      creditApplied: credit.creditApplied.toString(),
+      amountCharged: credit.amountDue.toString(),
+      creditBalance: credit.balanceAfter.toString(),
+      status: "succeeded" as const,
+      chargeId,
+      retryable: false,
     };
   }
 
@@ -415,4 +439,13 @@ export class BillingService {
 
     return [CSV_HEADER, ...rows].join("\n");
   }
+}
+
+/** Fees are integer minor units; reject fractional or non-finite numbers. */
+function toMinorUnits(amount: number | bigint): bigint {
+  if (typeof amount === "bigint") return amount;
+  if (!Number.isFinite(amount) || !Number.isInteger(amount)) {
+    throw new BadRequestException("Fee amount must be an integer number of minor units");
+  }
+  return BigInt(amount);
 }

@@ -97,4 +97,9 @@ export const envValidationSchema = Joi.object({
   GOOGLE_CLIENT_SECRET: Joi.string().allow('').optional(),
   GOOGLE_CALLBACK_URL: Joi.string().uri().allow('').optional(),
   GOOGLE_OAUTH_SUCCESS_REDIRECT: Joi.string().uri().allow('').optional(),
+
+  // Dev endpoints (Friendbot, etc.) — defaults to false on production / mainnet (#442).
+  // The application also force-disables dev endpoints when NODE_ENV=production or
+  // STELLAR_NETWORK=mainnet, regardless of this value.
+  ENABLE_DEV_ENDPOINTS: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(false),
 }).unknown(true);

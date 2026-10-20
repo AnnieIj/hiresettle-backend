@@ -81,3 +81,7 @@ jobs:
       - name: Integration tests
         run: ./node_modules/.bin/jest --testPathPattern="integration" --forceExit
         continue-on-error: true
+
+      - name: E2E tests
+        # Runs against the migrated test Postgres above; Stellar and notifications are mocked.
+        run: npm run test:e2e
