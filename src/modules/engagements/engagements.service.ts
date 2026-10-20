@@ -1,14 +1,22 @@
 import {
   Injectable, NotFoundException, ConflictException, BadRequestException, Logger, ForbiddenException,
 } from '@nestjs/common';
-import { User, EngagementStatus, MilestoneKind, MilestoneStatus, NotificationType, UserRole } from '@prisma/client';
+import { User, EngagementStatus, MilestoneKind, NotificationType, UserRole } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 import { CreateEngagementDto } from './dto/create-engagement.dto';
 import { EngagementSummaryDto } from './dto/engagement-summary.dto';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AuditLogService } from './audit-log.service';
+import { EngagementNotesService } from './engagement-notes.service';
+import { EngagementImportService } from './engagement-import.service';
+import { EngagementCandidateDetailsService } from './engagement-candidate-details.service';
 import { cursorPage } from '../../common/pagination/cursor-pagination';
+
+// String-literal constants for Prisma enums that may not resolve during Jest runs
+// (the generated client is mocked in unit tests).
+const MILESTONE_STATUS_LOCKED = 'LOCKED' as const;
+const MILESTONE_STATUS_PENDING = 'PENDING' as const;
 
 const ENGAGEMENT_SORTABLE_FIELDS: Record<string, string> = {
   createdAt: 'createdAt',
@@ -27,6 +35,9 @@ export class EngagementsService {
     private readonly stellar: StellarService,
     private readonly notifications: NotificationsService,
     private readonly auditLog: AuditLogService,
+    private readonly notesService: EngagementNotesService,
+    private readonly importService: EngagementImportService,
+    private readonly candidateDetailsService: EngagementCandidateDetailsService,
   ) {}
 
   // ----------------------------------------------------------
@@ -131,7 +142,7 @@ export class EngagementsService {
         kind: m.kind as MilestoneKind,
         paymentPercent: m.paymentPercent,
         retentionDays,
-        status: isRetention ? MilestoneStatus.LOCKED : MilestoneStatus.PENDING,
+        status: isRetention ? MILESTONE_STATUS_LOCKED : MILESTONE_STATUS_PENDING,
       };
     });
 
@@ -149,7 +160,7 @@ export class EngagementsService {
         salaryRange: mergedData.salaryRange,
         location: mergedData.location,
         customFields: mergedData.customFields ?? undefined,
-        status: EngagementStatus.PENDING_ACCEPTANCE,
+        status: 'PENDING_ACCEPTANCE',
         templateVersionId: templateVersion?.id,
         milestones: { create: milestoneData },
       },
@@ -160,7 +171,7 @@ export class EngagementsService {
 
     await this.notifications.notifyUser(
       mergedData.recruiterAddress,
-      NotificationType.ENGAGEMENT_CREATED,
+      'ENGAGEMENT_CREATED',
       `New engagement invite: ${mergedData.jobTitle}`,
       `You have a new engagement invite for "${mergedData.jobTitle}". Please accept or decline.`,
       { engagementId: engagement.id },
@@ -181,7 +192,7 @@ export class EngagementsService {
   ) {
     const where = {
       recruiterAddress: recruiterStellarAddress,
-      status: EngagementStatus.PENDING_ACCEPTANCE,
+      status: 'PENDING_ACCEPTANCE',
     };
 
     if (cursor) {
@@ -227,7 +238,7 @@ export class EngagementsService {
     if (engagement.recruiterAddress !== user.stellarAddress) {
       throw new ForbiddenException('You are not the invited recruiter for this engagement');
     }
-    if (engagement.status !== EngagementStatus.PENDING_ACCEPTANCE) {
+    if (engagement.status !== 'PENDING_ACCEPTANCE') {
       throw new ConflictException(`Engagement is not pending acceptance (current status: ${engagement.status})`);
     }
 
@@ -243,7 +254,7 @@ export class EngagementsService {
       );
     }
 
-    const retentionMilestones = engagement.milestones.filter((m) => m.kind === MilestoneKind.RETENTION);
+    const retentionMilestones = engagement.milestones.filter((m) => m.kind === 'RETENTION');
     const { txHash, ledger: createdLedger } = await this.stellar.submitCreateEngagement({
       engagementId: engagement.id,
       companyAddress: engagement.companyAddress,
@@ -255,7 +266,7 @@ export class EngagementsService {
         name: m.name,
         paymentPercent: m.paymentPercent,
         kind: m.kind,
-        retentionDays: m.kind === MilestoneKind.RETENTION
+        retentionDays: m.kind === 'RETENTION'
           ? retentionMilestones.indexOf(m) >= 0 && m.retentionDays != null
             ? m.retentionDays
             : undefined
@@ -267,9 +278,9 @@ export class EngagementsService {
 
     // 3. Build milestone data with unlock estimates
     let retentionIdx = 0;
-    const milestoneData = mergedData.milestones.map((m: any, index: number) => {
+    const milestoneData = engagement.milestones.map((m: any, index: number) => {
       const isRetention = m.kind === 'RETENTION';
-      const retentionDays = isRetention ? (mergedData.retentionDays?.[retentionIdx++] ?? null) : null;
+      const retentionDays = isRetention ? (engagement.milestones.filter((x: any) => x.kind === 'RETENTION')[retentionIdx++]?.retentionDays ?? null) : null;
       const validAfterLedger = isRetention && retentionDays
         ? createdLedger + (retentionDays * 17_280)
         : null;
@@ -286,35 +297,23 @@ export class EngagementsService {
         validAfterLedger: validAfterLedger ?? null,
         unlockEstimatedAt,
         placementDueAt: m.kind === 'PLACEMENT' && m.placementDueAt ? new Date(m.placementDueAt) : null,
-        status: isRetention ? MilestoneStatus.LOCKED : MilestoneStatus.PENDING,
+        status: isRetention ? MILESTONE_STATUS_LOCKED : MILESTONE_STATUS_PENDING,
       };
     });
 
     // 4. Persist engagement + milestones + retention schedules atomically
-    const engagement = await this.prisma.$transaction(async (tx) => {
-      const created = await tx.engagement.create({
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.engagement.update({
+        where: { id: engagementId },
         data: {
-          id: mergedData.engagementId,
-          companyAddress: mergedData.companyAddress,
-          recruiterAddress: mergedData.recruiterAddress,
-          arbiterAddress: mergedData.arbiterAddress,
-          tokenAddress: mergedData.tokenAddress,
-          totalAmount: BigInt(mergedData.totalAmount),
-          jobTitle: mergedData.jobTitle,
-          jobDescription: mergedData.jobDescription,
-          salaryRange: mergedData.salaryRange,
-          location: mergedData.location,
+          status: 'ACTIVE',
           txHash,
           createdLedger,
-          templateVersionId: templateVersion?.id,
-          requiredApprovals: mergedData.requiredApprovals ? parseInt(mergedData.requiredApprovals as any) : 1,
-          milestones: { create: milestoneData },
         },
-        include: { milestones: { orderBy: { milestoneIndex: 'asc' } } },
       });
 
       for (const m of engagement.milestones) {
-        if (m.kind === MilestoneKind.RETENTION && m.retentionDays) {
+        if (m.kind === 'RETENTION' && m.retentionDays) {
           const validAfterLedger = createdLedger + m.retentionDays * 17_280;
           const unlockEstimatedAt = this.stellar.ledgerToDateTime(validAfterLedger, currentLedger);
           await tx.milestone.update({
@@ -344,7 +343,7 @@ export class EngagementsService {
     await Promise.allSettled([
       this.notifications.notifyUser(
         engagement.companyAddress,
-        NotificationType.ENGAGEMENT_CREATED,
+        'ENGAGEMENT_CREATED',
         `Engagement accepted: ${engagement.jobTitle}`,
         `The recruiter has accepted the engagement "${engagement.jobTitle}" (${engagementId}). On-chain funding is in progress.`,
         { engagementId, txHash },
@@ -363,13 +362,13 @@ export class EngagementsService {
     if (engagement.recruiterAddress !== user.stellarAddress) {
       throw new ForbiddenException('You are not the invited recruiter for this engagement');
     }
-    if (engagement.status !== EngagementStatus.PENDING_ACCEPTANCE) {
+    if (engagement.status !== 'PENDING_ACCEPTANCE') {
       throw new ConflictException(`Engagement is not pending acceptance (current status: ${engagement.status})`);
     }
 
     const updated = await this.prisma.engagement.update({
       where: { id: engagementId },
-      data: { status: EngagementStatus.CANCELLED },
+      data: { status: 'CANCELLED' },
       include: { milestones: { orderBy: { milestoneIndex: 'asc' } } },
     });
 
@@ -377,7 +376,7 @@ export class EngagementsService {
 
     await this.notifications.notifyUser(
       engagement.companyAddress,
-      NotificationType.ENGAGEMENT_CANCELLED,
+      'ENGAGEMENT_CANCELLED',
       `Engagement declined: ${engagement.jobTitle}`,
       `The recruiter has declined the engagement invite for "${engagement.jobTitle}" (${engagementId}).`,
       { engagementId },
@@ -513,81 +512,32 @@ export class EngagementsService {
   }
 
   /**
-   * Calculates and retrieves the aggregated summary for an engagement.
+   * Delegate to EngagementCandidateDetailsService.
+   * Kept here so the controller interface stays unchanged.
    */
   async getSummary(id: string, userId: string): Promise<EngagementSummaryDto> {
-    const engagement = await this.prisma.engagement.findUnique({
-      where: { id },
-      include: { milestones: true },
-    });
-
-    if (!engagement) {
-      throw new NotFoundException('Engagement not found');
-    }
-
-    if (engagement.clientId !== userId && engagement.freelancerId !== userId) {
-      throw new ForbiddenException('You do not have access to this engagement');
-    }
-
-    let totalAmount = BigInt(0);
-    let releasedAmount = BigInt(0);
-    let milestonesCompleted = 0;
-
-    for (const milestone of engagement.milestones) {
-      const amount = typeof milestone.amount === 'bigint' ? milestone.amount : BigInt(milestone.amount as any);
-      totalAmount += amount;
-
-      if (milestone.status === MilestoneStatus.CONFIRMED || milestone.status === MilestoneStatus.RESOLVED) {
-        releasedAmount += amount;
-        milestonesCompleted++;
-      }
-    }
-
-    const lockedAmount = totalAmount - releasedAmount;
-
-    return {
-      totalAmount: totalAmount.toString(),
-      releasedAmount: releasedAmount.toString(),
-      lockedAmount: lockedAmount.toString(),
-      milestonesTotal: engagement.milestones.length,
-      milestonesCompleted,
-    };
+    return this.candidateDetailsService.getSummary(id, userId);
   }
 
   // ----------------------------------------------------------
-  // NOTES
+  // NOTES — delegated to EngagementNotesService
   // ----------------------------------------------------------
 
-  async createNote(engagementId: string, user: { id: string; stellarAddress?: string; role: string }, body: string) {
-    const engagement = await this.prisma.engagement.findUnique({ where: { id: engagementId } });
-    if (!engagement) throw new NotFoundException(`Engagement ${engagementId} not found`);
-    this.checkParticipant(engagement, user);
-
-    return this.prisma.engagementNote.create({
-      data: { engagementId, authorId: user.id, body },
-    });
+  /** Add an internal note (delegates to EngagementNotesService). */
+  createNote(
+    engagementId: string,
+    user: { id: string; stellarAddress?: string; role: string },
+    body: string,
+  ) {
+    return this.notesService.createNote(engagementId, user, body);
   }
 
-  async findNotes(engagementId: string, user: { id: string; stellarAddress?: string; role: string }) {
-    const engagement = await this.prisma.engagement.findUnique({ where: { id: engagementId } });
-    if (!engagement) throw new NotFoundException(`Engagement ${engagementId} not found`);
-    this.checkParticipant(engagement, user);
-
-    return this.prisma.engagementNote.findMany({
-      where: { engagementId },
-      orderBy: { createdAt: 'asc' },
-    });
-  }
-
-  private checkParticipant(
-    engagement: { companyAddress: string; recruiterAddress: string; arbiterAddress: string },
-    user: { stellarAddress?: string; role: string },
-  ): void {
-    if (user.role === UserRole.ADMIN) return;
-    const parties = [engagement.companyAddress, engagement.recruiterAddress, engagement.arbiterAddress];
-    if (!user.stellarAddress || !parties.includes(user.stellarAddress)) {
-      throw new ForbiddenException('You are not a participant of this engagement');
-    }
+  /** List internal notes (delegates to EngagementNotesService). */
+  findNotes(
+    engagementId: string,
+    user: { id: string; stellarAddress?: string; role: string },
+  ) {
+    return this.notesService.findNotes(engagementId, user);
   }
 
   // ----------------------------------------------------------
@@ -608,8 +558,8 @@ export class EngagementsService {
     }
 
     if (
-      engagement.status === EngagementStatus.CANCELLED ||
-      engagement.status === EngagementStatus.COMPLETED
+      engagement.status === 'CANCELLED' ||
+      engagement.status === 'COMPLETED'
     ) {
       throw new ConflictException(
         `Cannot cancel an engagement with status '${engagement.status}'`,
@@ -622,7 +572,7 @@ export class EngagementsService {
     const updated = await this.prisma.$transaction(async (tx) => {
       return tx.engagement.update({
         where: { id: engagementId },
-        data: { status: EngagementStatus.CANCELLED },
+        data: { status: 'CANCELLED' },
         include: { milestones: { orderBy: { milestoneIndex: 'asc' } } },
       });
     });
@@ -635,21 +585,21 @@ export class EngagementsService {
     await Promise.allSettled([
       this.notifications.notifyUser(
         engagement.companyAddress,
-        NotificationType.ENGAGEMENT_CANCELLED,
+        'ENGAGEMENT_CANCELLED',
         notifyTitle,
         notifyMessage,
         { engagementId, txHash },
       ),
       this.notifications.notifyUser(
         engagement.recruiterAddress,
-        NotificationType.ENGAGEMENT_CANCELLED,
+        'ENGAGEMENT_CANCELLED',
         notifyTitle,
         notifyMessage,
         { engagementId, txHash },
       ),
       this.notifications.notifyUser(
         engagement.arbiterAddress,
-        NotificationType.ENGAGEMENT_CANCELLED,
+        'ENGAGEMENT_CANCELLED',
         notifyTitle,
         notifyMessage,
         { engagementId, txHash },
@@ -684,9 +634,9 @@ export class EngagementsService {
     }
 
     if (
-      engagement.status === EngagementStatus.CANCELLED ||
-      engagement.status === EngagementStatus.COMPLETED ||
-      engagement.status === EngagementStatus.REPLACEMENT_REQUESTED
+      engagement.status === 'CANCELLED' ||
+      engagement.status === 'COMPLETED' ||
+      engagement.status === 'REPLACEMENT_REQUESTED'
     ) {
       throw new ConflictException(
         `Cannot request replacement for an engagement with status '${engagement.status}'`,
@@ -696,7 +646,7 @@ export class EngagementsService {
     const updated = await this.prisma.$transaction(async (tx) => {
       return tx.engagement.update({
         where: { id: engagementId },
-        data: { status: EngagementStatus.REPLACEMENT_REQUESTED },
+        data: { status: 'REPLACEMENT_REQUESTED' },
         include: { milestones: { orderBy: { milestoneIndex: 'asc' } } },
       });
     });
@@ -710,21 +660,21 @@ export class EngagementsService {
     await Promise.allSettled([
       this.notifications.notifyUser(
         engagement.companyAddress,
-        NotificationType.REPLACEMENT_REQUESTED,
+        'REPLACEMENT_REQUESTED',
         notifyTitle,
         notifyMessage,
         { engagementId, reason: reason ?? null },
       ),
       this.notifications.notifyUser(
         engagement.recruiterAddress,
-        NotificationType.REPLACEMENT_REQUESTED,
+        'REPLACEMENT_REQUESTED',
         notifyTitle,
         notifyMessage,
         { engagementId, reason: reason ?? null },
       ),
       this.notifications.notifyUser(
         engagement.arbiterAddress,
-        NotificationType.REPLACEMENT_REQUESTED,
+        'REPLACEMENT_REQUESTED',
         notifyTitle,
         notifyMessage,
         { engagementId, reason: reason ?? null },
@@ -767,16 +717,16 @@ export class EngagementsService {
       const fundingShortfall = escrowBalance !== expectedEscrowBalance;
 
       const statusMap: Record<string, EngagementStatus> = {
-        Active: EngagementStatus.ACTIVE,
-        Completed: EngagementStatus.COMPLETED,
-        Cancelled: EngagementStatus.CANCELLED,
-        ReplacementRequested: EngagementStatus.REPLACEMENT_REQUESTED,
+        Active: 'ACTIVE',
+        Completed: 'COMPLETED',
+        Cancelled: 'CANCELLED',
+        ReplacementRequested: 'REPLACEMENT_REQUESTED',
       };
 
       await this.prisma.engagement.update({
         where: { id: engagementId },
         data: {
-          status: statusMap[onChain.status] ?? EngagementStatus.ACTIVE,
+          status: statusMap[onChain.status] ?? 'ACTIVE',
           releasedAmount,
           escrowBalance,
           fundingShortfall,
@@ -791,14 +741,14 @@ export class EngagementsService {
         await Promise.all([
           this.notifications.notifyUser(
             engagement.companyAddress,
-            NotificationType.FUNDING_SHORTFALL_DETECTED,
+            'FUNDING_SHORTFALL_DETECTED',
             'Engagement funding shortfall detected',
             message,
             { engagementId, expectedEscrowBalance: expectedEscrowBalance.toString(), escrowBalance: escrowBalance.toString() },
           ),
           this.notifications.notifyUser(
             engagement.recruiterAddress,
-            NotificationType.FUNDING_SHORTFALL_DETECTED,
+            'FUNDING_SHORTFALL_DETECTED',
             'Engagement funding shortfall detected',
             message,
             { engagementId, expectedEscrowBalance: expectedEscrowBalance.toString(), escrowBalance: escrowBalance.toString() },
@@ -856,7 +806,7 @@ export class EngagementsService {
     });
     if (!engagement) throw new NotFoundException('Engagement not found');
 
-    if (userRole !== UserRole.ARBITER || !engagement.arbiter || engagement.arbiter.id !== userId) {
+    if (userRole !== 'ARBITER' || !engagement.arbiter || engagement.arbiter.id !== userId) {
       throw new ForbiddenException('Only the assigned arbiter can recuse themselves');
     }
 
@@ -869,13 +819,13 @@ export class EngagementsService {
 
     // Notify all admins
     const admins = await this.prisma.user.findMany({
-      where: { role: UserRole.ADMIN, deactivatedAt: null },
+      where: { role: 'ADMIN', deactivatedAt: null },
     });
 
     for (const admin of admins) {
       await this.notifications.notifyUserById(
         admin.id,
-        NotificationType.ARBITER_RECUSAL_REQUESTED,
+        'ARBITER_RECUSAL_REQUESTED',
         'Arbiter Recusal Requested',
         `Arbiter ${engagement.arbiter?.name} has recused themselves from engagement ${engagementId}. Please reassign.`,
         { engagementId, arbiterId: userId },
@@ -954,124 +904,20 @@ export class EngagementsService {
   }
 
   // ----------------------------------------------------------
-  // CSV BULK IMPORT (#254)
+  // CSV BULK IMPORT (#254) — delegated to EngagementImportService
   // ----------------------------------------------------------
 
   /**
-   * Parses a multipart CSV upload and attempts to create each row as an engagement.
-   * Invalid rows are collected in the errors report without stopping the rest of the batch.
-   *
-   * Expected CSV columns:
-   *   engagementId, companyAddress, recruiterAddress, arbiterAddress, tokenAddress,
-   *   totalAmount, jobTitle, jobDescription (opt), salaryRange (opt), location (opt),
-   *   tags (opt, pipe-separated e.g. "engineering|urgent")
-   *
-   * The CSV must include a header row.
+   * Delegate CSV bulk import to EngagementImportService.
+   * Kept here so the controller interface stays unchanged.
    */
-  async importFromCsv(user: User, file: Express.Multer.File) {
-    if (!file?.buffer) {
-      throw new BadRequestException('No file provided or file is empty');
-    }
-
-    const csv = file.buffer.toString('utf-8');
-    const lines = csv.split(/\r?\n/).filter((l) => l.trim().length > 0);
-
-    if (lines.length < 2) {
-      throw new BadRequestException('CSV file must contain a header row and at least one data row');
-    }
-
-    const REQUIRED_COLUMNS = [
-      'engagementId', 'companyAddress', 'recruiterAddress', 'arbiterAddress',
-      'tokenAddress', 'totalAmount', 'jobTitle',
-    ];
-
-    const headers = lines[0].split(',').map((h) => h.trim());
-    const missingRequired = REQUIRED_COLUMNS.filter((c) => !headers.includes(c));
-    if (missingRequired.length > 0) {
-      throw new BadRequestException(
-        `CSV is missing required column(s): ${missingRequired.join(', ')}`,
-      );
-    }
-
-    const results: Array<{ row: number; engagementId?: string; success: boolean; error?: string }> = [];
-    let successCount = 0;
-    let failureCount = 0;
-
-    for (let i = 1; i < lines.length; i++) {
-      const rowNum = i + 1; // 1-based, accounting for header at row 1
-      try {
-        const values = this.parseCsvLine(lines[i]);
-        const row: Record<string, string> = {};
-        headers.forEach((h, idx) => {
-          row[h] = values[idx]?.trim() ?? '';
-        });
-
-        // Per-row required-field validation
-        const rowMissing = REQUIRED_COLUMNS.filter((c) => !row[c]);
-        if (rowMissing.length > 0) {
-          throw new Error(`Missing required field(s): ${rowMissing.join(', ')}`);
-        }
-
-        const dto: CreateEngagementDto = {
-          engagementId: row['engagementId'],
-          companyAddress: row['companyAddress'],
-          recruiterAddress: row['recruiterAddress'],
-          arbiterAddress: row['arbiterAddress'],
-          tokenAddress: row['tokenAddress'],
-          totalAmount: row['totalAmount'],
-          jobTitle: row['jobTitle'],
-          jobDescription: row['jobDescription'] || undefined,
-          salaryRange: row['salaryRange'] || undefined,
-          location: row['location'] || undefined,
-          tags: row['tags'] ? row['tags'].split('|').map((t) => t.trim()).filter(Boolean) : [],
-          // CSV import does not support milestone configuration inline — use templates for that
-          milestones: [],
-        };
-
-        await this.create(user, dto);
-        successCount++;
-        results.push({ row: rowNum, engagementId: dto.engagementId, success: true });
-      } catch (error) {
-        failureCount++;
-        results.push({ row: rowNum, success: false, error: error.message ?? String(error) });
-        this.logger.warn(`CSV import row ${rowNum} failed: ${error.message}`);
-      }
-    }
-
-    this.logger.log(`CSV import complete: ${successCount} created, ${failureCount} failed`);
-    return {
-      totalRows: lines.length - 1,
-      successCount,
-      failureCount,
-      results,
-    };
+  importFromCsv(user: User, file: Express.Multer.File) {
+    return this.importService.importFromCsv(user, file);
   }
 
-  /** Splits a single CSV line, handling double-quoted fields. */
-  private parseCsvLine(line: string): string[] {
-    const result: string[] = [];
-    let current = '';
-    let inQuotes = false;
-
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (ch === ',' && !inQuotes) {
-        result.push(current);
-        current = '';
-      } else {
-        current += ch;
-      }
-    }
-    result.push(current);
-    return result;
-  }
+  // ----------------------------------------------------------
+  // SERIALISE HELPERS
+  // ----------------------------------------------------------
 
   private serialize(engagement: any) {
     return {
@@ -1141,7 +987,7 @@ export class EngagementsService {
       for (const address of usersToNotify) {
         await this.notifications.notifyUser(
           address,
-          NotificationType.ENGAGEMENT_CANCELLED, // Using CANCELLED as a generic override notification type for now
+          'ENGAGEMENT_CANCELLED', // Using CANCELLED as a generic override notification type for now
           `Engagement ${engagementId} status updated by Admin`,
           `The status of engagement ${engagementId} has been manually changed from ${oldStatus} to ${newStatus} by an administrator. Reason: ${reason}`,
           { engagementId, oldStatus, newStatus, reason },

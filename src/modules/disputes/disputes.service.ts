@@ -3,7 +3,9 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { ConfigService } from '@nestjs/config';
 import {
   Dispute,
@@ -52,6 +54,7 @@ export class DisputesService {
     private readonly config: ConfigService,
     private readonly arbiters: ArbiterAssignmentService,
     private readonly sla: DisputeSlaService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
     this.appealWindowHours = Number(this.config.get('DISPUTE_APPEAL_WINDOW_HOURS', 72));
     // Window during which either party may submit dispute evidence (#499).

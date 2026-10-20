@@ -18,10 +18,23 @@ import { DisputesModule } from '../disputes/disputes.module';
 import { ReconciliationService } from './reconciliation.service';
 import { IncomingPaymentPollerService } from './incoming-payment-poller.service';
 import { UnmatchedPaymentsService } from './unmatched-payments.service';
+import { BullModule } from '@nestjs/bullmq';
+import { SystemConfigController } from './system-config.controller';
+import { JobsController } from './jobs.controller';
+import { JobsService, MANAGED_QUEUES } from './jobs.service';
 
 @Module({
-  imports: [NotificationsModule, PrismaModule, UsersModule, WebhooksModule, AuthModule, MaintenanceModeModule, DisputesModule],
-  controllers: [AdminController],
+  imports: [
+    NotificationsModule,
+    PrismaModule,
+    UsersModule,
+    WebhooksModule,
+    AuthModule,
+    MaintenanceModeModule,
+    DisputesModule,
+    BullModule.registerQueue(...MANAGED_QUEUES.map((name) => ({ name }))),
+  ],
+  controllers: [AdminController, SystemConfigController, JobsController],
   providers: [
     AdminUsersService,
     AdminDeadLetterService,
@@ -34,6 +47,7 @@ import { UnmatchedPaymentsService } from './unmatched-payments.service';
     ReconciliationService,
     IncomingPaymentPollerService,
     UnmatchedPaymentsService,
+    JobsService,
   ],
   exports: [AdminUsersService],
 })

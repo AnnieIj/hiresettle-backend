@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "hiresettle-backend.fullname" . }}-test-connection"
+  labels:
+    {{- include "hiresettle-backend.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command: ["sh", "-c"]
+      args:
+        - >-
+          wget -qO- http://{{ include "hiresettle-backend.fullname" . }}:{{ .Values.service.port }}/healthz/live &&
+          wget -qO- http://{{ include "hiresettle-backend.fullname" . }}:{{ .Values.service.port }}/.well-known/jwks.json

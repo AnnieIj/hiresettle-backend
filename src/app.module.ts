@@ -80,6 +80,7 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     DataRetentionModule,
 
     PrismaModule,
+    SystemConfigModule,
     S3Module,
     PasswordPolicyModule,
     HibpModule,
@@ -105,8 +106,10 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
+    WellKnownModule,
   ],
   providers: [
     {
