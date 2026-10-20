@@ -44,6 +44,7 @@ import stellarConfig from "./config/stellar.config";
 import { MaintenanceModeModule } from "./common/maintenance/maintenance-mode.module";
 import { FeatureFlagsModule } from "./modules/feature-flags/feature-flags.module";
 import { DevModule } from "./modules/dev/dev.module";
+import { EmailModule } from "./email/email.module";
 
 export function shouldSkipThrottle(req: { path?: string; url?: string; originalUrl?: string }): boolean {
   const path = req.path ?? req.originalUrl?.split('?')[0] ?? req.url?.split('?')[0] ?? '';

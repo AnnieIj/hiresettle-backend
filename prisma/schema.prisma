@@ -231,6 +231,7 @@ model User {
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
   arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
+  companySsoConfig     CompanySsoConfig?        @relation("CompanySsoConfig")
 
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
@@ -1202,6 +1203,75 @@ model MultisigPendingTransaction {
   @@index([signerSetId])
   @@index([status])
   @@map("multisig_pending_transactions")
+}
+
+// ============================================================
+// EMAIL BOUNCE / COMPLAINT SUPPRESSION (#478)
+// ============================================================
+
+enum EmailSuppressionReason {
+  HARD_BOUNCE
+  COMPLAINT
+}
+
+/// An email address that must not receive further messages.
+model SuppressedEmail {
+  id        String                 @id @default(uuid())
+  email     String                 @unique
+  reason    EmailSuppressionReason
+  sourceId  String?                // SNS MessageId or other provider reference
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+
+  @@index([email])
+  @@map("suppressed_emails")
+}
+
+// ============================================================
+// SEP-10 STELLAR WEB AUTHENTICATION (#494)
+// ============================================================
+
+/// A single-use challenge issued to a Stellar account for SEP-10 authentication.
+model Sep10Challenge {
+  id        String    @id @default(uuid())
+  account   String                // G... Stellar public key
+  nonce     String    @unique     // base64 nonce embedded in the manageData op
+  xdr       String    @db.Text   // unsigned+server-signed challenge XDR
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([account])
+  @@map("sep10_challenges")
+}
+
+// ============================================================
+// SAML/OIDC SINGLE SIGN-ON FOR ENTERPRISE COMPANIES (#478 / #489)
+// ============================================================
+
+enum SsoProtocol {
+  OIDC
+  SAML
+}
+
+/// Per-company IdP configuration for enterprise SSO.
+model CompanySsoConfig {
+  id            String      @id @default(uuid())
+  companyId     String      @unique
+  protocol      SsoProtocol @default(OIDC)
+  issuer        String
+  clientId      String?
+  clientSecret  String?
+  metadataUrl   String?
+  defaultRole   String?
+  isEnabled     Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  company User @relation("CompanySsoConfig", fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("company_sso_configs")
 }
 
 // One row per signer per pending transaction. The unique constraint on
