@@ -18,6 +18,11 @@ export const envValidationSchema = Joi.object({
   SMTP_PASS: Joi.string().required(),
 
   PORT: Joi.number().port().default(3000),
+  CORS_ALLOWED_HEADERS: Joi.string()
+    .default(
+      'Content-Type, Authorization, Idempotency-Key, X-API-Key, If-None-Match, X-Request-Id',
+    )
+    .allow(''),
   LOG_LEVEL: Joi.string()
     .valid('error', 'warn', 'log', 'debug', 'verbose')
     .default('log'),
@@ -60,7 +65,7 @@ export const envValidationSchema = Joi.object({
   DISPUTE_SLA_ASSIGNMENT_HOURS: Joi.number().integer().min(1).max(720).default(24),
   DISPUTE_SLA_REVIEW_HOURS: Joi.number().integer().min(1).max(720).default(72),
   DISPUTE_SLA_APPEAL_HOURS: Joi.number().integer().min(1).max(720).default(72),
-  
+
   // Database connection pooling
   DATABASE_POOL_MIN: Joi.number().integer().min(1).max(20).default(2),
   DATABASE_POOL_MAX: Joi.number().integer().min(2).max(50).default(10),

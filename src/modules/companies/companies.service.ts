@@ -9,6 +9,7 @@ import { CompanyRole } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { UpdateProofSlaSettingsDto } from './dto/proof-sla-settings.dto';
+import { SetSpendingLimitDto } from './dto/spending-limit.dto';
 
 const TRANSFER_TTL_DAYS = 7;
 
@@ -261,7 +262,6 @@ export class CompaniesService {
     // Original owner: companyId == their own userId
     return userId;
   }
-}
 
   // ----------------------------------------------------------
   // COMPANY ENGAGEMENT STATS (#374)
@@ -341,5 +341,72 @@ export class CompaniesService {
       ...(dateTo ? { dateTo: new Date(dateTo).toISOString() } : {}),
       generatedAt: new Date().toISOString(),
     };
+  }
+
+  // ── Issue #479: per-member spending limits ────────────────────────────────
+
+  /**
+   * Set (or clear) the spending limit for a company member.
+   * Only the company owner may call this.
+   */
+  async setMemberSpendingLimit(
+    companyOwnerId: string,
+    memberId: string,
+    dto: SetSpendingLimitDto,
+  ) {
+    const companyId = await this.resolveCompanyId(companyOwnerId);
+
+    const membership = await this.prisma.companyMember.findUnique({
+      where: { companyId_memberId: { companyId, memberId } },
+    });
+    if (!membership) {
+      throw new NotFoundException('Member not found in this company');
+    }
+
+    return this.prisma.companyMember.update({
+      where: { companyId_memberId: { companyId, memberId } },
+      data: { spendingLimit: dto.spendingLimit ?? null },
+      select: { memberId: true, spendingLimit: true },
+    });
+  }
+
+  /**
+   * Enforce the spending limit for a member when creating or funding an engagement.
+   * `amountCents` is the new amount to be committed.
+   * Throws ForbiddenException (403) if the limit would be exceeded.
+   */
+  async enforceSpendingLimit(
+    companyOwnerId: string,
+    memberId: string,
+    amountCents: number,
+  ): Promise<void> {
+    const companyId = await this.resolveCompanyId(companyOwnerId);
+
+    const membership = await this.prisma.companyMember.findUnique({
+      where: { companyId_memberId: { companyId, memberId } },
+      select: { spendingLimit: true },
+    });
+
+    if (!membership || membership.spendingLimit === null) {
+      // No cap configured — allow.
+      return;
+    }
+
+    // Sum all non-cancelled engagement amounts funded by this member.
+    const aggregate = await this.prisma.engagement.aggregate({
+      where: {
+        clientId: memberId,
+        status: { not: 'CANCELLED' },
+      },
+      _sum: { totalAmount: true },
+    });
+
+    const alreadySpent = Number(aggregate._sum.totalAmount ?? 0);
+    if (alreadySpent + amountCents > membership.spendingLimit) {
+      throw new ForbiddenException(
+        `This action would exceed the member's spending limit of ${membership.spendingLimit} cents ` +
+          `(already spent: ${alreadySpent}, requested: ${amountCents}).`,
+      );
+    }
   }
 }

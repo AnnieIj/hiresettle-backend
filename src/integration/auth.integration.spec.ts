@@ -37,6 +37,33 @@ describe('Auth integration', () => {
     name: 'Integration User',
   };
 
+  describe('CORS preflight', () => {
+    it('allows required headers on OPTIONS preflight requests', async () => {
+      const origin = 'http://localhost:3001';
+      const allowedHeaders = [
+        'Content-Type',
+        'Authorization',
+        'Idempotency-Key',
+        'X-API-Key',
+        'If-None-Match',
+        'X-Request-Id',
+      ];
+
+      const res = await request(httpServer)
+        .options(`${baseUrl}/auth/login`)
+        .set('Origin', origin)
+        .set('Access-Control-Request-Method', 'POST')
+        .set('Access-Control-Request-Headers', allowedHeaders.join(', '))
+        .expect(204);
+
+      expect(res.headers['access-control-allow-origin']).toBe(origin);
+      const allowHeaders = (res.headers['access-control-allow-headers'] ?? '').toLowerCase();
+      for (const header of allowedHeaders.map((value) => value.toLowerCase())) {
+        expect(allowHeaders).toContain(header);
+      }
+    });
+  });
+
   // ── Register ──────────────────────────────────────────────────────────────
 
   describe('POST /auth/register', () => {

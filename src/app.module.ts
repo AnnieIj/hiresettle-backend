@@ -1,48 +1,54 @@
-import { Module, MiddlewareConsumer, NestModule } from '@nestjs/common';
-import { APP_INTERCEPTOR } from '@nestjs/core';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { ThrottlerModule } from '@nestjs/throttler';
-import { ScheduleModule } from '@nestjs/schedule';
-import { TerminusModule } from '@nestjs/terminus';
-import { BullModule } from '@nestjs/bullmq';
-import { AppCacheModule } from './common/cache/cache.module';
-import { envValidationSchema } from './config/env.validation';
-import { AppLoggerModule } from './common/logger/logger.module';
-import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
-import { EtagInterceptor } from './common/interceptors/etag.interceptor';
-import { SecurityEventsModule } from './common/security-events/security-events.module';
-import { QueuesModule } from './queues/queues.module';
+import { Module, MiddlewareConsumer, NestModule } from "@nestjs/common";
+import { APP_INTERCEPTOR } from "@nestjs/core";
+import { ConfigModule, ConfigService } from "@nestjs/config";
+import { ThrottlerModule } from "@nestjs/throttler";
+import { ScheduleModule } from "@nestjs/schedule";
+import { TerminusModule } from "@nestjs/terminus";
+import { BullModule } from "@nestjs/bullmq";
+import { AppCacheModule } from "./common/cache/cache.module";
+import { envValidationSchema } from "./config/env.validation";
+import { AppLoggerModule } from "./common/logger/logger.module";
+import { RequestIdMiddleware } from "./common/middleware/request-id.middleware";
+import { EtagInterceptor } from "./common/interceptors/etag.interceptor";
+import { SecurityEventsModule } from "./common/security-events/security-events.module";
+import { QueuesModule } from "./queues/queues.module";
 
-import { MetricsModule } from './metrics/metrics.module';
-import { DataRetentionModule } from './common/retention/data-retention.module';
+import { MetricsModule } from "./metrics/metrics.module";
+import { DataRetentionModule } from "./common/retention/data-retention.module";
 
-import { PrismaModule } from './common/prisma/prisma.module';
-import { S3Module } from './common/s3/s3.module';
-import { PasswordPolicyModule } from './common/password/password-policy.module';
-import { HibpModule } from './common/hibp/hibp.module';
-import { StellarModule as CommonStellarModule } from './common/stellar/stellar.module';
-import { StellarModule } from './modules/stellar/stellar.module';
+import { PrismaModule } from "./common/prisma/prisma.module";
+import { S3Module } from "./common/s3/s3.module";
+import { PasswordPolicyModule } from "./common/password/password-policy.module";
+import { HibpModule } from "./common/hibp/hibp.module";
+import { StellarModule as CommonStellarModule } from "./common/stellar/stellar.module";
+import { StellarModule } from "./modules/stellar/stellar.module";
+import { MultisigModule } from "./modules/multisig/multisig.module";
 
-import { AuthModule } from './modules/auth/auth.module';
-import { EngagementsModule } from './modules/engagements/engagements.module';
-import { EngagementTemplatesModule } from './modules/engagement-templates/engagement-templates.module';
-import { RecruitersModule } from './modules/recruiters/recruiters.module';
-import { MilestonesModule } from './modules/milestones/milestones.module';
-import { DisputesModule } from './modules/disputes/disputes.module';
-import { EventsModule } from './modules/events/events.module';
-import { NotificationsModule } from './modules/notifications/notifications.module';
-import { UsersModule } from './modules/users/users.module';
-import { HealthModule } from './modules/health/health.module';
-import { AdminModule } from './modules/admin/admin.module';
-import { AnnouncementsModule } from './modules/announcements/announcements.module';
-import { BillingModule } from './modules/billing/billing.module';
-import { TeamInvitesModule } from './modules/team-invites/team-invites.module';
-import { CompaniesModule } from './modules/companies/companies.module';
-import { GraphqlModule } from './graphql/graphql.module';
-import stellarConfig from './config/stellar.config';
-import { MaintenanceModeModule } from './common/maintenance/maintenance-mode.module';
-import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
-import { DevModule } from './modules/dev/dev.module';
+import { AuthModule } from "./modules/auth/auth.module";
+import { EngagementsModule } from "./modules/engagements/engagements.module";
+import { EngagementTemplatesModule } from "./modules/engagement-templates/engagement-templates.module";
+import { RecruitersModule } from "./modules/recruiters/recruiters.module";
+import { MilestonesModule } from "./modules/milestones/milestones.module";
+import { DisputesModule } from "./modules/disputes/disputes.module";
+import { EventsModule } from "./modules/events/events.module";
+import { NotificationsModule } from "./modules/notifications/notifications.module";
+import { UsersModule } from "./modules/users/users.module";
+import { HealthModule } from "./modules/health/health.module";
+import { AdminModule } from "./modules/admin/admin.module";
+import { AnnouncementsModule } from "./modules/announcements/announcements.module";
+import { BillingModule } from "./modules/billing/billing.module";
+import { TeamInvitesModule } from "./modules/team-invites/team-invites.module";
+import { CompaniesModule } from "./modules/companies/companies.module";
+import { GraphqlModule } from "./graphql/graphql.module";
+import stellarConfig from "./config/stellar.config";
+import { MaintenanceModeModule } from "./common/maintenance/maintenance-mode.module";
+import { FeatureFlagsModule } from "./modules/feature-flags/feature-flags.module";
+import { DevModule } from "./modules/dev/dev.module";
+
+export function shouldSkipThrottle(req: { path?: string; url?: string; originalUrl?: string }): boolean {
+  const path = req.path ?? req.originalUrl?.split('?')[0] ?? req.url?.split('?')[0] ?? '';
+  return path === '/health' || path === '/status';
+}
 
 @Module({
   imports: [
@@ -52,7 +58,7 @@ import { DevModule } from './modules/dev/dev.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         throttlers: [{ ttl: config.get<number>('THROTTLE_TTL', 60), limit: config.get<number>('THROTTLE_LIMIT', 100) }],
-        skipIf: (context) => context.switchToHttp().getRequest().url === '/health',
+        skipIf: (context) => shouldSkipThrottle(context.switchToHttp().getRequest()),
       }),
     }),
     ScheduleModule.forRoot(),
@@ -64,7 +70,9 @@ import { DevModule } from './modules/dev/dev.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        connection: { url: config.get<string>('REDIS_URL', 'redis://localhost:6379') },
+        connection: {
+          url: config.get<string>("REDIS_URL", "redis://localhost:6379"),
+        },
       }),
     }),
     QueuesModule,
@@ -77,7 +85,11 @@ import { DevModule } from './modules/dev/dev.module';
     HibpModule,
     CommonStellarModule,
     StellarModule,
-    ...(process.env.NODE_ENV === 'production' || process.env.STELLAR_NETWORK === 'mainnet' ? [] : [DevModule]),
+    MultisigModule,
+    ...(process.env.NODE_ENV === "production" ||
+    process.env.STELLAR_NETWORK === "mainnet"
+      ? []
+      : [DevModule]),
     AuthModule,
     EngagementsModule,
     EngagementTemplatesModule,
@@ -93,6 +105,7 @@ import { DevModule } from './modules/dev/dev.module';
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
   ],
@@ -105,6 +118,6 @@ import { DevModule } from './modules/dev/dev.module';
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RequestIdMiddleware).forRoutes('*');
+    consumer.apply(RequestIdMiddleware).forRoutes("*");
   }
 }

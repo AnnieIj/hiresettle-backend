@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { UserRole } from "@prisma/client";
 import { AdminUsersService } from "./admin-users.service";
+import { buildUser } from "../../../../test/factories";
 
 describe("AdminUsersService company verification", () => {
   const prisma = {
@@ -16,11 +17,11 @@ describe("AdminUsersService company verification", () => {
   });
 
   it("sets verification and invalidates the public profile cache", async () => {
-    const user = {
+    const user = buildUser({
       id: "company-1",
       role: UserRole.COMPANY,
       stellarAddress: "GABC",
-    };
+    });
     const updated = { ...user, verifiedAt: new Date() };
     prisma.user.findUnique.mockResolvedValue(user);
     prisma.user.update.mockResolvedValue(updated);
@@ -39,11 +40,11 @@ describe("AdminUsersService company verification", () => {
   });
 
   it("clears verification for a company", async () => {
-    const user = {
+    const user = buildUser({
       id: "company-1",
       role: UserRole.COMPANY,
       stellarAddress: null,
-    };
+    });
     prisma.user.findUnique.mockResolvedValue(user);
     prisma.user.update.mockResolvedValue({ ...user, verifiedAt: null });
 
@@ -58,10 +59,8 @@ describe("AdminUsersService company verification", () => {
   });
 
   it("rejects non-company users", async () => {
-    prisma.user.findUnique.mockResolvedValue({
-      id: "recruiter-1",
-      role: UserRole.RECRUITER,
-    });
+    const recruiter = buildUser({ id: "recruiter-1", role: UserRole.RECRUITER });
+    prisma.user.findUnique.mockResolvedValue(recruiter);
 
     await expect(
       service.setCompanyVerification("recruiter-1", true),

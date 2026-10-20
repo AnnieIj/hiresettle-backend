@@ -18,7 +18,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 describe('DisputesController (API)', () => {
   let app: INestApplication;
 
-  const prisma = { dispute: { findUnique: jest.fn() } };
+  const prisma = { dispute: { findUnique: jest.fn() }, arbiterPayout: { findMany: jest.fn() } };
   const disputes = { findOneForUser: jest.fn(), decide: jest.fn() };
   const appeals = { openAppeal: jest.fn(), decideAppeal: jest.fn() };
 
@@ -150,6 +150,46 @@ describe('DisputesController (API)', () => {
         .set(as(arbiter))
         .send({ outcome: 'RELEASE' })
         .expect(404);
+    });
+  });
+
+  describe('GET /disputes/arbiter-payouts (#500)', () => {
+    const admin = { id: 'admin-1', role: 'ADMIN' };
+    const payout = {
+      id: 'payout-1',
+      disputeId: 'dispute-1',
+      arbiterId: 'arb-1',
+      feeType: 'PERCENT',
+      feeValue: 5,
+      amount: 50n,
+      createdAt: new Date('2026-10-01T00:00:00.000Z'),
+      arbiter: { id: 'arb-1', name: 'Ada Arbiter', email: 'ada@test.com' },
+    };
+
+    it('scopes an arbiter to their own payouts and serializes bigint amounts', async () => {
+      prisma.arbiterPayout.findMany.mockResolvedValue([payout]);
+
+      const res = await request(app.getHttpServer()).get('/disputes/arbiter-payouts').set(as(arbiter)).expect(200);
+
+      expect(prisma.arbiterPayout.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { arbiterId: 'arb-1' } }),
+      );
+      expect(res.body).toEqual({
+        payouts: [{ ...payout, amount: '50', createdAt: payout.createdAt.toISOString() }],
+        totalAmount: '50',
+      });
+    });
+
+    it('lets admins see every payout', async () => {
+      prisma.arbiterPayout.findMany.mockResolvedValue([payout]);
+
+      await request(app.getHttpServer()).get('/disputes/arbiter-payouts').set(as(admin)).expect(200);
+
+      expect(prisma.arbiterPayout.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: {} }));
+    });
+
+    it('is restricted to arbiters and admins', async () => {
+      await request(app.getHttpServer()).get('/disputes/arbiter-payouts').set(as(company)).expect(403);
     });
   });
 });
