@@ -22,6 +22,7 @@ import { PasswordPolicyModule } from "./common/password/password-policy.module";
 import { HibpModule } from "./common/hibp/hibp.module";
 import { StellarModule as CommonStellarModule } from "./common/stellar/stellar.module";
 import { StellarModule } from "./modules/stellar/stellar.module";
+import { MultisigModule } from "./modules/multisig/multisig.module";
 
 import { AuthModule } from "./modules/auth/auth.module";
 import { EngagementsModule } from "./modules/engagements/engagements.module";
@@ -43,7 +44,11 @@ import stellarConfig from "./config/stellar.config";
 import { MaintenanceModeModule } from "./common/maintenance/maintenance-mode.module";
 import { FeatureFlagsModule } from "./modules/feature-flags/feature-flags.module";
 import { DevModule } from "./modules/dev/dev.module";
-import { WellKnownModule } from "./modules/well-known/well-known.module";
+
+export function shouldSkipThrottle(req: { path?: string; url?: string; originalUrl?: string }): boolean {
+  const path = req.path ?? req.originalUrl?.split('?')[0] ?? req.url?.split('?')[0] ?? '';
+  return path === '/health' || path === '/status';
+}
 
 @Module({
   imports: [
@@ -52,14 +57,8 @@ import { WellKnownModule } from "./modules/well-known/well-known.module";
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        throttlers: [
-          {
-            ttl: config.get<number>("THROTTLE_TTL", 60),
-            limit: config.get<number>("THROTTLE_LIMIT", 100),
-          },
-        ],
-        skipIf: (context) =>
-          context.switchToHttp().getRequest().url === "/health",
+        throttlers: [{ ttl: config.get<number>('THROTTLE_TTL', 60), limit: config.get<number>('THROTTLE_LIMIT', 100) }],
+        skipIf: (context) => shouldSkipThrottle(context.switchToHttp().getRequest()),
       }),
     }),
     ScheduleModule.forRoot(),
@@ -81,11 +80,13 @@ import { WellKnownModule } from "./modules/well-known/well-known.module";
     DataRetentionModule,
 
     PrismaModule,
+    SystemConfigModule,
     S3Module,
     PasswordPolicyModule,
     HibpModule,
     CommonStellarModule,
     StellarModule,
+    MultisigModule,
     ...(process.env.NODE_ENV === "production" ||
     process.env.STELLAR_NETWORK === "mainnet"
       ? []
@@ -105,6 +106,7 @@ import { WellKnownModule } from "./modules/well-known/well-known.module";
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
     WellKnownModule,

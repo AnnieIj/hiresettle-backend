@@ -36,14 +36,17 @@ export class AdminUsersService {
     const limit = dto.limit ?? 20;
     const skip = (page - 1) * limit;
 
+    const searchTerm = dto.q ?? dto.search;
     const where: Prisma.UserWhereInput = {
       ...(dto.role ? { role: dto.role } : {}),
-      ...(dto.search
+      ...(searchTerm
         ? {
             OR: [
-              { id: { contains: dto.search, mode: 'insensitive' } },
-              { name: { contains: dto.search, mode: 'insensitive' } },
-              { email: { contains: dto.search, mode: 'insensitive' } },
+              { id: { contains: searchTerm, mode: 'insensitive' } },
+              { name: { contains: searchTerm, mode: 'insensitive' } },
+              { email: { contains: searchTerm, mode: 'insensitive' } },
+              { stellarAddress: { contains: searchTerm, mode: 'insensitive' } },
+              { company: { contains: searchTerm, mode: 'insensitive' } },
             ],
           }
         : {}),

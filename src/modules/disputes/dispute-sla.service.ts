@@ -1,10 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { DisputeSlaStatus, DisputeStage, NotificationType, UserRole } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ACTIVE_DISPUTE_STATUSES } from './dispute.constants';
+
+/** Runtime-tunable SLA settings per stage (#503). */
+const STAGE_SYSTEM_CONFIG_KEYS: Record<DisputeStage, string> = {
+  [DisputeStage.ASSIGNMENT]: 'disputes.slaAssignmentHours',
+  [DisputeStage.ARBITER_REVIEW]: 'disputes.slaReviewHours',
+  [DisputeStage.APPEAL_REVIEW]: 'disputes.slaAppealHours',
+};
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -23,22 +31,33 @@ const HOUR_MS = 60 * 60 * 1000;
 export class DisputeSlaService {
   private readonly logger = new Logger(DisputeSlaService.name);
   private readonly stageHours: Record<DisputeStage, number>;
+  private readonly evidenceWarningHours: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
     this.stageHours = {
       [DisputeStage.ASSIGNMENT]: Number(this.config.get('DISPUTE_SLA_ASSIGNMENT_HOURS', 24)),
       [DisputeStage.ARBITER_REVIEW]: Number(this.config.get('DISPUTE_SLA_REVIEW_HOURS', 72)),
       [DisputeStage.APPEAL_REVIEW]: Number(this.config.get('DISPUTE_SLA_APPEAL_HOURS', 72)),
     };
+    // How long before the evidence deadline (#499) both parties are warned.
+    this.evidenceWarningHours = Number(this.config.get('DISPUTE_EVIDENCE_WARNING_HOURS', 12));
+  }
+
+  /** SLA hours for a stage; admin overrides apply without a restart (#503). */
+  hoursFor(stage: DisputeStage): number {
+    return this.systemConfig
+      ? this.systemConfig.getNumber(STAGE_SYSTEM_CONFIG_KEYS[stage])
+      : this.stageHours[stage];
   }
 
   /** Response deadline for a stage entered at `from`. */
   deadlineFor(stage: DisputeStage, from: Date = new Date()): Date {
-    return new Date(from.getTime() + this.stageHours[stage] * HOUR_MS);
+    return new Date(from.getTime() + this.hoursFor(stage) * HOUR_MS);
   }
 
   /** Fields to write when a dispute enters a new stage — resets the SLA clock. */
@@ -108,5 +127,55 @@ export class DisputeSlaService {
 
     this.logger.warn(`Flagged ${flagged} overdue dispute(s)`);
     return flagged;
+  }
+
+  /**
+   * Warns both parties on a dispute when its evidence submission window
+   * (#499) is about to close, so neither side is caught out by a deadline
+   * they didn't know about. Runs on the same cadence as the SLA check and
+   * fires once per dispute (tracked via evidenceDeadlineWarnedAt).
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async notifyEvidenceDeadlinesClosing(now: Date = new Date()): Promise<number> {
+    const warnFrom = new Date(now.getTime() + this.evidenceWarningHours * HOUR_MS);
+
+    const closingSoon = await this.prisma.dispute.findMany({
+      where: {
+        status: { in: ACTIVE_DISPUTE_STATUSES },
+        evidenceDeadlineWarnedAt: null,
+        evidenceDeadline: { not: null, lte: warnFrom, gt: now },
+      },
+      select: { id: true, engagementId: true, evidenceDeadline: true },
+    });
+    if (!closingSoon.length) return 0;
+
+    let warned = 0;
+    for (const dispute of closingSoon) {
+      // Conditional update so concurrent job runs warn each dispute only once.
+      const { count } = await this.prisma.dispute.updateMany({
+        where: { id: dispute.id, evidenceDeadlineWarnedAt: null },
+        data: { evidenceDeadlineWarnedAt: now },
+      });
+      if (!count) continue;
+      warned++;
+
+      const engagement = await this.prisma.engagement.findUnique({ where: { id: dispute.engagementId } });
+      if (!engagement) continue;
+
+      for (const userId of [engagement.companyId, engagement.recruiterId]) {
+        if (!userId) continue;
+        await this.notifications.notifyUserById(
+          userId,
+          NotificationType.DISPUTE_EVIDENCE_WINDOW_CLOSING,
+          'Dispute evidence window closing soon',
+          `The evidence submission window for dispute ${dispute.id} closes at ` +
+            `${dispute.evidenceDeadline!.toISOString()}. Submit any remaining evidence before then.`,
+          { disputeId: dispute.id, engagementId: dispute.engagementId, evidenceDeadline: dispute.evidenceDeadline },
+        );
+      }
+    }
+
+    this.logger.log(`Warned ${warned} dispute(s) of a closing evidence window`);
+    return warned;
   }
 }

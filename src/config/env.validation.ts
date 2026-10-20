@@ -3,6 +3,12 @@ import * as Joi from 'joi';
 export const envValidationSchema = Joi.object({
   DATABASE_URL: Joi.string().required(),
   JWT_SECRET: Joi.string().min(32).required(),
+  // Asymmetric JWT signing + rotation (#481). JSON array of
+  // { kid, privateKey?, publicKey? } PEM entries (or a file with the same JSON).
+  JWT_SIGNING_KEYS: Joi.string().allow('').optional(),
+  JWT_SIGNING_KEYS_FILE: Joi.string().allow('').optional(),
+  JWT_ACTIVE_KID: Joi.string().allow('').optional(),
+  JWT_ACCEPT_LEGACY_HS256: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(false),
   STELLAR_NETWORK: Joi.string().valid('testnet', 'mainnet', 'futurenet').required(),
   SOROBAN_CONTRACT_ADDRESS: Joi.string().required(),
   HIRESETTLE_CONTRACT_VERSION: Joi.string().default('1'),
@@ -12,6 +18,11 @@ export const envValidationSchema = Joi.object({
   SMTP_PASS: Joi.string().required(),
 
   PORT: Joi.number().port().default(3000),
+  CORS_ALLOWED_HEADERS: Joi.string()
+    .default(
+      'Content-Type, Authorization, Idempotency-Key, X-API-Key, If-None-Match, X-Request-Id',
+    )
+    .allow(''),
   LOG_LEVEL: Joi.string()
     .valid('error', 'warn', 'log', 'debug', 'verbose')
     .default('log'),
@@ -54,7 +65,7 @@ export const envValidationSchema = Joi.object({
   DISPUTE_SLA_ASSIGNMENT_HOURS: Joi.number().integer().min(1).max(720).default(24),
   DISPUTE_SLA_REVIEW_HOURS: Joi.number().integer().min(1).max(720).default(72),
   DISPUTE_SLA_APPEAL_HOURS: Joi.number().integer().min(1).max(720).default(72),
-  
+
   // Database connection pooling
   DATABASE_POOL_MIN: Joi.number().integer().min(1).max(20).default(2),
   DATABASE_POOL_MAX: Joi.number().integer().min(2).max(50).default(10),

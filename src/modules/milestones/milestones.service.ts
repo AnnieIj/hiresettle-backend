@@ -785,6 +785,14 @@ export class MilestonesService {
     }
     this.checkPartyAccess((milestone as any).engagement, user);
 
+    // Reject evidence uploaded after the dispute's evidence window closed (#499).
+    const dispute = await this.disputes.findActiveForMilestone(milestone.id);
+    if (dispute && !this.disputes.isEvidenceWindowOpen(dispute)) {
+      throw new BadRequestException(
+        `The evidence submission window for this dispute closed at ${dispute.evidenceDeadline?.toISOString()}`,
+      );
+    }
+
     const key = `evidence/${engagementId}/${milestoneIndex}/${user.id}/${Date.now()}-${file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     await this.s3.uploadFile(key, file.buffer, file.mimetype);
     const s3Url = await this.s3.getPresignedUrl(key);

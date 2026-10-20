@@ -12,12 +12,11 @@ import { HttpExceptionFilter } from "./common/filters/http-exception.filter";
 import { TransformInterceptor } from "./common/interceptors/transform.interceptor";
 import { TooManyRequestsHeadersFilter } from "./common/filters/too-many-requests-headers.filter";
 import { TracingInterceptor } from "./common/interceptors/tracing.interceptor";
-import { RateLimitHeadersInterceptor } from "./common/interceptors/rate-limit-headers.interceptor";
 import { assertSecureJwtSecret } from "./common/utils/jwt-secret.util";
+import { createCompressionMiddleware } from "./common/utils/compression.util";
 import { JwtService } from "@nestjs/jwt";
 import { HttpMetricsInterceptor } from "./metrics/http-metrics.interceptor";
 import { MetricsService } from "./metrics/metrics.service";
-import { Reflector } from "@nestjs/core";
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
@@ -41,7 +40,15 @@ async function bootstrap() {
   const allowedOrigins = allowedOriginsStr
     .split(",")
     .map((origin) => origin.trim());
-  const sentryDsn = config.get<string>("SENTRY_DSN");
+  const corsAllowedHeaders = config
+    .get<string>(
+      'CORS_ALLOWED_HEADERS',
+      'Content-Type, Authorization, Idempotency-Key, X-API-Key, If-None-Match, X-Request-Id',
+    )
+    .split(',')
+    .map((header) => header.trim())
+    .filter(Boolean);
+  const sentryDsn = config.get<string>('SENTRY_DSN');
 
   if (sentryDsn && !["test", "ci"].includes(nodeEnv)) {
     Sentry.init({
@@ -51,6 +58,9 @@ async function bootstrap() {
     app.use(Sentry.Handlers.requestHandler());
     app.use(Sentry.Handlers.errorHandler());
   }
+
+  // Compress responses (gzip/brotli), skipping SSE streams (#514)
+  app.use(createCompressionMiddleware());
 
   // Configure Helmet security headers
   app.use(
@@ -86,8 +96,17 @@ async function bootstrap() {
 
   app.enableCors({
     origin: corsOriginValidator,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: corsAllowedHeaders,
+    exposedHeaders: [
+      'ETag',
+      'X-Request-Id',
+      'X-Request-ID',
+      'Retry-After',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+    ],
     credentials: true,
   });
 
@@ -97,7 +116,6 @@ async function bootstrap() {
       { path: "docs", method: RequestMethod.GET },
       { path: "docs-json", method: RequestMethod.GET },
       { path: "metrics", method: RequestMethod.GET },
-      { path: ".well-known/security.txt", method: RequestMethod.GET },
     ],
   });
 
