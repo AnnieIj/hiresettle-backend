@@ -59,6 +59,7 @@ export class WebhooksService {
         userId: meta.userId,
         secret: meta.secret,
         subscriptionId: meta.subscriptionId,
+        startTime: Date.now(),
       });
       this.logger.log(
         `Webhook job enqueued for ${url} (event: ${payload.event})`,

@@ -5,6 +5,7 @@ import { Transporter } from 'nodemailer';
 
 import { EmailTemplate, EmailTemplateName } from './email-template.enum';
 import { renderEmailTemplate } from './email-template.renderer';
+import { BounceService } from './bounce.service';
 
 export interface SendEmailOptions {
   to: string;
@@ -38,7 +39,10 @@ export class EmailService {
   private readonly transporter: Transporter;
   private readonly defaultLocale: string;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly bounceService: BounceService,
+  ) {
     this.defaultLocale = this.configService.get<string>('EMAIL_DEFAULT_LOCALE', 'en');
     this.transporter = nodemailer.createTransport({
       host: this.configService.get<string>('SMTP_HOST'),
@@ -72,6 +76,13 @@ export class EmailService {
 
   async sendEmail(options: SendEmailOptions): Promise<void> {
     const { to, subject, template, locale, context } = options;
+
+    // Issue #478: skip delivery to suppressed (bounced / complained) addresses.
+    if (await this.bounceService.isSuppressed(to)) {
+      this.logger.warn(`Skipping email to suppressed address: ${to}`);
+      return;
+    }
+
     const resolvedLocale = locale || this.defaultLocale;
 
     const { html } = renderEmailTemplate(template, resolvedLocale, context ?? {});

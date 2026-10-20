@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { NotificationType, MilestoneKind } from '@prisma/client';
 
@@ -23,19 +24,27 @@ import { NotificationType, MilestoneKind } from '@prisma/client';
 @Injectable()
 export class PlacementReminderSchedulerService {
   private readonly logger = new Logger(PlacementReminderSchedulerService.name);
-  private readonly reminderDays: number;
+  private readonly envReminderDays: number;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
-    this.reminderDays = this.config.get<number>('PLACEMENT_MILESTONE_REMINDER_DAYS', 7);
+    this.envReminderDays = this.config.get<number>('PLACEMENT_MILESTONE_REMINDER_DAYS', 7);
+  }
+
+  /** Reminder window; admin overrides apply without a restart (#503). */
+  private get reminderDays(): number {
+    return this.systemConfig
+      ? this.systemConfig.getNumber('milestones.placementReminderDays')
+      : this.envReminderDays;
   }
 
   @Cron(CronExpression.EVERY_HOUR)
   async sendPlacementReminders() {
-    if (this.reminderDays <= 0) return; // disabled via env
+    if (this.reminderDays <= 0) return; // disabled via env or SystemConfig
 
     const now = new Date();
     const reminderThreshold = new Date(now.getTime() + this.reminderDays * 24 * 60 * 60 * 1000);

@@ -142,6 +142,40 @@ enum DisputeAppealStatus {
   DECIDED
 }
 
+// Restored: created by 20260927100000_milestone_workflow_enhancements but
+// dropped from the schema by a later merge (#376–#379).
+enum PartialReleaseStatus {
+  PROPOSED
+  EXECUTED
+  REJECTED
+  FAILED
+}
+
+enum PartialRemainderAction {
+  REFUND
+  RETAIN
+}
+
+enum ProofSlaAction {
+  AUTO_APPROVE
+  ESCALATE_TO_ADMIN
+}
+
+enum ProofVersionStatus {
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+// Prepaid credit ledger entry kinds (#507)
+enum CreditLedgerEntryType {
+  PURCHASE       // credits bought by the company
+  GRANT          // promotional / goodwill credits issued by an admin
+  FEE_DEDUCTION  // credits consumed to pay a platform fee
+  REVERSAL       // a previous entry undone (e.g. a refunded fee)
+  ADJUSTMENT     // manual admin correction, positive or negative
+}
+
 // ============================================================
 // MODELS
 // ============================================================
@@ -192,6 +226,9 @@ model User {
   discordWebhookUrl String?     // Discord incoming-webhook URL for notification alerts (#278)
   teamsWebhookUrl String?       // Microsoft Teams incoming-webhook URL for notification alerts (#391)
   batchWindowSeconds Int        @default(60) // notification batching window in seconds (#279)
+  // Company tax profile used for invoice VAT / reverse charge (#506)
+  taxCountry     String?        // ISO 3166-1 alpha-2 country of establishment, e.g. "DE"
+  taxId          String?        // VAT / tax registration number, normalised (uppercase, no spaces), e.g. "DE123456789"
   // Email change flow (#356): pending new address + HMAC token cleared after confirmation
   pendingEmail               String?
   emailChangeToken           String?  @unique
@@ -199,6 +236,9 @@ model User {
   // Tokenized iCal feed (#380): SHA-256 of the raw feed token; null = feed disabled
   calendarTokenHash          String?  @unique
   calendarTokenCreatedAt     DateTime?
+  // Company proof review SLA settings (#377)
+  proofSlaDays               Int            @default(7)
+  proofSlaAction             ProofSlaAction @default(ESCALATE_TO_ADMIN)
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -242,7 +282,8 @@ model User {
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
   arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
-  disputeMessages      DisputeMessage[]
+  milestoneComments    MilestoneComment[]
+  creditLedgerEntries  CreditLedger[]           @relation("CompanyCreditLedger")
 
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
@@ -491,6 +532,9 @@ model Milestone {
   approvals          MilestoneApproval[]
   refunds            Refund[]
   disputes           Dispute[]
+  proofVersions      MilestoneProofVersion[]
+  partialReleases    MilestonePartialRelease[]
+  comments           MilestoneComment[]
 
   @@unique([engagementId, milestoneIndex])
   @@index([status])
@@ -931,12 +975,15 @@ model FavoriteRecruiter {
 // Existing single-user company accounts are implicitly OWNER; a CompanyMember row is
 // only required when additional team members are added.
 model CompanyMember {
-  id          String      @id @default(uuid())
-  companyId   String
-  memberId    String
-  companyRole CompanyRole @default(MEMBER)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id            String      @id @default(uuid())
+  companyId     String
+  memberId      String
+  companyRole   CompanyRole @default(MEMBER)
+  // Issue #479: optional cap on how much this member may fund across engagements.
+  // Stored in the smallest currency unit (e.g. cents). NULL means no cap.
+  spendingLimit Int?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   company User @relation("CompanyOwner", fields: [companyId], references: [id], onDelete: Cascade)
   member  User @relation("MemberUser",   fields: [memberId],  references: [id], onDelete: Cascade)

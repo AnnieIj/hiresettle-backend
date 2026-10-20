@@ -1,0 +1,10 @@
+# Rendered in CI with the chart defaults plus inline secrets.
+secrets:
+  values:
+    DATABASE_URL: postgresql://hiresettle:password@postgres:5432/hiresettle_db
+    REDIS_URL: redis://redis:6379
+    JWT_SECRET: ci-only-placeholder-secret-0123456789abcdef
+    SOROBAN_CONTRACT_ADDRESS: CCIPLACEHOLDER
+    SMTP_HOST: smtp.example.com
+    SMTP_USER: ci
+    SMTP_PASS: ci

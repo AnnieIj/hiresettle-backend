@@ -3,6 +3,12 @@ import * as Joi from 'joi';
 export const envValidationSchema = Joi.object({
   DATABASE_URL: Joi.string().required(),
   JWT_SECRET: Joi.string().min(32).required(),
+  // Asymmetric JWT signing + rotation (#481). JSON array of
+  // { kid, privateKey?, publicKey? } PEM entries (or a file with the same JSON).
+  JWT_SIGNING_KEYS: Joi.string().allow('').optional(),
+  JWT_SIGNING_KEYS_FILE: Joi.string().allow('').optional(),
+  JWT_ACTIVE_KID: Joi.string().allow('').optional(),
+  JWT_ACCEPT_LEGACY_HS256: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(false),
   STELLAR_NETWORK: Joi.string().valid('testnet', 'mainnet', 'futurenet').required(),
   SOROBAN_CONTRACT_ADDRESS: Joi.string().required(),
   HIRESETTLE_CONTRACT_VERSION: Joi.string().default('1'),
@@ -91,4 +97,9 @@ export const envValidationSchema = Joi.object({
   GOOGLE_CLIENT_SECRET: Joi.string().allow('').optional(),
   GOOGLE_CALLBACK_URL: Joi.string().uri().allow('').optional(),
   GOOGLE_OAUTH_SUCCESS_REDIRECT: Joi.string().uri().allow('').optional(),
+
+  // Dev endpoints (Friendbot, etc.) — defaults to false on production / mainnet (#442).
+  // The application also force-disables dev endpoints when NODE_ENV=production or
+  // STELLAR_NETWORK=mainnet, regardless of this value.
+  ENABLE_DEV_ENDPOINTS: Joi.boolean().truthy('true', '1', 'yes').falsy('false', '0', 'no').default(false),
 }).unknown(true);

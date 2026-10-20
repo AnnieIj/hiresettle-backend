@@ -132,8 +132,10 @@ async function bootstrap() {
   );
 
   const metricsService = app.get(MetricsService);
+  const reflector = app.get(Reflector);
   app.useGlobalInterceptors(
     new HttpMetricsInterceptor(metricsService),
+    new RateLimitHeadersInterceptor(reflector, config),
     new TracingInterceptor(),
     new TransformInterceptor(),
   );

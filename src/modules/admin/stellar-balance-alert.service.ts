@@ -3,8 +3,10 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
@@ -23,6 +25,7 @@ export class StellarBalanceAlertService implements OnModuleInit, OnModuleDestroy
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {}
 
   onModuleInit() {
@@ -48,9 +51,10 @@ export class StellarBalanceAlertService implements OnModuleInit, OnModuleDestroy
       if (!address) return;
 
       const balance = await this.stellar.getBackendAccountBalance();
-      const threshold = BigInt(
-        this.config.get<number>('STELLAR_BALANCE_ALERT_THRESHOLD_STROOPS', 10000000),
-      );
+      // Admin override applies on the next check without a restart (#503).
+      const threshold = this.systemConfig
+        ? this.systemConfig.getBigInt('stellar.balanceAlertThresholdStroops')
+        : BigInt(this.config.get<number>('STELLAR_BALANCE_ALERT_THRESHOLD_STROOPS', 10000000));
       const breached = balance < threshold;
       const state = await this.prisma.systemConfig.findUnique({
         where: { key: BALANCE_BREACH_KEY },

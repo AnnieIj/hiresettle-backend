@@ -1,16 +1,25 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
-import { ConfigService } from '@nestjs/config';
 import * as Sentry from '@sentry/node';
+import { JwtKeyStore } from './jwt-keys/jwt-key-store.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(config: ConfigService) {
+  constructor(keyStore: JwtKeyStore) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: config.get<string>('JWT_SECRET'),
+      // Resolve the key from the token's alg/kid so tokens signed by a
+      // rotated-out (but still listed) key stay valid until expiry (#481).
+      algorithms: keyStore.verifyAlgorithms(),
+      secretOrKeyProvider: (_req: unknown, rawJwtToken: string, done: (err: any, key?: any) => void) => {
+        try {
+          done(null, keyStore.verificationKeyFor(rawJwtToken));
+        } catch (err) {
+          done(err);
+        }
+      },
     });
   }
 

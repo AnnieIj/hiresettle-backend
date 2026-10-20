@@ -43,7 +43,7 @@ import { GraphqlModule } from "./graphql/graphql.module";
 import stellarConfig from "./config/stellar.config";
 import { MaintenanceModeModule } from "./common/maintenance/maintenance-mode.module";
 import { FeatureFlagsModule } from "./modules/feature-flags/feature-flags.module";
-import { DevModule } from "./modules/dev/dev.module";
+import { DevModuleFactory } from "./modules/dev/dev-module.factory";
 
 export function shouldSkipThrottle(req: { path?: string; url?: string; originalUrl?: string }): boolean {
   const path = req.path ?? req.originalUrl?.split('?')[0] ?? req.url?.split('?')[0] ?? '';
@@ -80,16 +80,14 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     DataRetentionModule,
 
     PrismaModule,
+    SystemConfigModule,
     S3Module,
     PasswordPolicyModule,
     HibpModule,
     CommonStellarModule,
     StellarModule,
     MultisigModule,
-    ...(process.env.NODE_ENV === "production" ||
-    process.env.STELLAR_NETWORK === "mainnet"
-      ? []
-      : [DevModule]),
+    DevModuleFactory.register(),
     AuthModule,
     EngagementsModule,
     EngagementTemplatesModule,
@@ -105,8 +103,10 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
+    WellKnownModule,
   ],
   providers: [
     {
