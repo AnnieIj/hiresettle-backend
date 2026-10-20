@@ -5,6 +5,10 @@ import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { TwoFactorService } from './two-factor.service';
+import { SessionService } from './session.service';
+import { WalletAuthService } from './wallet-auth.service';
+import { OAuthService } from './oauth.service';
 import { ApiKeysService } from './api-keys.service';
 import { JwtStrategy } from './jwt.strategy';
 import { ApiKeyGuard } from '../../common/guards/api-key.guard';
@@ -25,7 +29,28 @@ import { ApiKeyScopesGuard } from '../../common/guards/api-key-scopes.guard';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, ApiKeysService, JwtStrategy, ApiKeyGuard, JwtOrApiKeyGuard, ApiKeyScopesGuard],
-  exports: [AuthService, ApiKeysService, ApiKeyGuard, JwtOrApiKeyGuard, ApiKeyScopesGuard],
+  providers: [
+    AuthService,
+    TwoFactorService,
+    SessionService,
+    WalletAuthService,
+    OAuthService,
+    ApiKeysService,
+    JwtStrategy,
+    ApiKeyGuard,
+    JwtOrApiKeyGuard,
+    ApiKeyScopesGuard,
+  ],
+  exports: [
+    AuthService,
+    TwoFactorService,
+    SessionService,
+    WalletAuthService,
+    OAuthService,
+    ApiKeysService,
+    ApiKeyGuard,
+    JwtOrApiKeyGuard,
+    ApiKeyScopesGuard,
+  ],
 })
 export class AuthModule {}
