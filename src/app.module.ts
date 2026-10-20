@@ -105,6 +105,7 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     BillingModule,
     TeamInvitesModule,
     CompaniesModule,
+    EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
   ],

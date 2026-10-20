@@ -916,12 +916,15 @@ model FavoriteRecruiter {
 // Existing single-user company accounts are implicitly OWNER; a CompanyMember row is
 // only required when additional team members are added.
 model CompanyMember {
-  id          String      @id @default(uuid())
-  companyId   String
-  memberId    String
-  companyRole CompanyRole @default(MEMBER)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id            String      @id @default(uuid())
+  companyId     String
+  memberId      String
+  companyRole   CompanyRole @default(MEMBER)
+  // Issue #479: optional cap on how much this member may fund across engagements.
+  // Stored in the smallest currency unit (e.g. cents). NULL means no cap.
+  spendingLimit Int?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   company User @relation("CompanyOwner", fields: [companyId], references: [id], onDelete: Cascade)
   member  User @relation("MemberUser",   fields: [memberId],  references: [id], onDelete: Cascade)
