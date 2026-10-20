@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { ListUsersDto } from './dto/list-users.dto';
-import { Prisma, UserRole, MilestoneStatus } from '@prisma/client';
+import { AdminSubRole, Prisma, UserRole, MilestoneStatus } from '@prisma/client';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CacheService } from '../../common/cache/cache.service';
 import { cursorPage } from '../../common/pagination/cursor-pagination';
@@ -13,6 +13,7 @@ const USER_SELECT = {
   name: true,
   company: true,
   role: true,
+  adminSubRole: true,
   deactivatedAt: true,
   rateLimitOverride: true,
   verifiedAt: true,
@@ -361,5 +362,22 @@ export class AdminUsersService {
 
   async listPlans() {
     return this.prisma.plan.findMany({ orderBy: { maxActiveEngagements: 'asc' } });
+  }
+
+  // ----------------------------------------------------------
+  // Admin sub-role management
+  // ----------------------------------------------------------
+
+  async setAdminSubRole(targetId: string, subRole: AdminSubRole | null) {
+    const user = await this.prisma.user.findUnique({ where: { id: targetId } });
+    if (!user) throw new NotFoundException(`User ${targetId} not found`);
+    if (user.role !== UserRole.ADMIN) {
+      throw new BadRequestException('Admin sub-roles can only be set on ADMIN users');
+    }
+    return this.prisma.user.update({
+      where: { id: targetId },
+      data: { adminSubRole: subRole },
+      select: { ...USER_SELECT },
+    });
   }
 }

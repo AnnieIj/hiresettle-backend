@@ -19,6 +19,7 @@ import {
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { S3Service } from '../../common/s3/s3.service';
 import { ArbiterAssignmentService, EngagementParties } from './arbiter-assignment.service';
 import { DisputeSlaService } from './dispute-sla.service';
 import { ACTIVE_DISPUTE_STATUSES } from './dispute.constants';
@@ -395,5 +396,159 @@ export class DisputesService {
       if (!userId || userId === excludeUserId) continue;
       await this.notifications.notifyUserById(userId, type, title, message, { engagementId, ...data });
     }
+  }
+
+  // ----------------------------------------------------------
+  // MESSAGING (#dispute-messaging)
+  // ----------------------------------------------------------
+
+  /**
+   * Verify the actor may access this dispute's messages, then return all
+   * messages newest-first. Pre-signed S3 URLs are generated on the fly for
+   * any attachment so the caller never needs raw S3 keys.
+   */
+  async listMessages(disputeId: string, actor: DisputeActor) {
+    const dispute = await this.prisma.dispute.findUnique({
+      where: { id: disputeId },
+      include: { engagement: true, appeal: { select: { arbiterId: true } } },
+    });
+    if (!dispute) throw new NotFoundException(`Dispute ${disputeId} not found`);
+    this.assertCanAccessMessages(dispute, actor);
+
+    const rows = await this.prisma.disputeMessage.findMany({
+      where: { disputeId },
+      orderBy: { createdAt: 'asc' },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    return Promise.all(
+      rows.map(async (m) => ({
+        id: m.id,
+        disputeId: m.disputeId,
+        body: m.body,
+        author: m.author,
+        attachmentName: m.attachmentName,
+        attachmentSize: m.attachmentSize,
+        attachmentMimeType: m.attachmentMimeType,
+        attachmentUrl: m.attachmentS3Key
+          ? await this.s3.getPresignedUrl(m.attachmentS3Key).catch(() => null)
+          : null,
+        createdAt: m.createdAt,
+      })),
+    );
+  }
+
+  /**
+   * Create a dispute message. The actor must be a participant or admin.
+   * An optional multipart file is uploaded to S3; the key is stored but the
+   * raw key is never returned — callers get a presigned URL instead.
+   */
+  async createMessage(
+    disputeId: string,
+    actor: DisputeActor,
+    body: string,
+    attachment?: Express.Multer.File,
+  ) {
+    const dispute = await this.prisma.dispute.findUnique({
+      where: { id: disputeId },
+      include: { engagement: true, appeal: { select: { arbiterId: true } } },
+    });
+    if (!dispute) throw new NotFoundException(`Dispute ${disputeId} not found`);
+    this.assertCanAccessMessages(dispute, actor);
+
+    // Upload attachment first so the DB row is only created when S3 succeeded.
+    let attachmentS3Key: string | null = null;
+    if (attachment) {
+      attachmentS3Key = `disputes/${disputeId}/messages/${Date.now()}-${attachment.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      await this.s3.uploadFile(attachmentS3Key, attachment.buffer, attachment.mimetype);
+    }
+
+    const message = await this.prisma.disputeMessage.create({
+      data: {
+        disputeId,
+        authorId: actor.id,
+        body,
+        ...(attachment && attachmentS3Key
+          ? {
+              attachmentS3Key,
+              attachmentName: attachment.originalname,
+              attachmentSize: attachment.size,
+              attachmentMimeType: attachment.mimetype,
+            }
+          : {}),
+      },
+      include: { author: { select: { id: true, name: true, email: true } } },
+    });
+
+    // Notify every participant except the author.
+    await this.notifyMessageParticipants(dispute, actor, message.id);
+
+    return {
+      id: message.id,
+      disputeId: message.disputeId,
+      body: message.body,
+      author: message.author,
+      attachmentName: message.attachmentName,
+      attachmentSize: message.attachmentSize,
+      attachmentMimeType: message.attachmentMimeType,
+      attachmentUrl: attachmentS3Key
+        ? await this.s3.getPresignedUrl(attachmentS3Key).catch(() => null)
+        : null,
+      createdAt: message.createdAt,
+    };
+  }
+
+  // ----------------------------------------------------------
+  // MESSAGING — helpers
+  // ----------------------------------------------------------
+
+  /**
+   * A user may access dispute messages when they are:
+   *   - The company or recruiter on the engagement, OR
+   *   - The arbiter assigned to the dispute or its appeal, OR
+   *   - An ADMIN
+   */
+  private assertCanAccessMessages(
+    dispute: Dispute & {
+      engagement: EngagementParties & { arbiterAddress: string };
+      appeal: { arbiterId: string | null } | null;
+    },
+    actor: DisputeActor,
+  ): void {
+    if (this.canView(dispute, actor)) return;
+    throw new ForbiddenException('Not a party to this dispute');
+  }
+
+  private async notifyMessageParticipants(
+    dispute: Dispute & { engagement: EngagementParties },
+    author: DisputeActor,
+    messageId: string,
+  ) {
+    const { engagement } = dispute;
+    const recipientIds = new Set<string>();
+
+    // Both sides of the engagement
+    if (engagement.companyId) recipientIds.add(engagement.companyId);
+    if (engagement.recruiterId) recipientIds.add(engagement.recruiterId);
+    // Assigned arbiter
+    if (dispute.arbiterId) recipientIds.add(dispute.arbiterId);
+    // Exclude the author
+    recipientIds.delete(author.id);
+
+    const title = 'New message on dispute';
+    const text = `A new message was posted on dispute ${dispute.id}.`;
+    const data = { disputeId: dispute.id, engagementId: dispute.engagementId, messageId };
+
+    await Promise.allSettled(
+      [...recipientIds].map((userId) =>
+        this.notifications.notifyUserById(
+          userId,
+          NotificationType.DISPUTE_MESSAGE_CREATED,
+          title,
+          text,
+          data,
+        ),
+      ),
+    );
   }
 }

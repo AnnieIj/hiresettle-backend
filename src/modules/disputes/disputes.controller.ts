@@ -1,5 +1,18 @@
-import { Body, Controller, Get, NotFoundException, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
+import { ApiBearerAuth, ApiConsumes, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { DisputeStage, UserRole } from '@prisma/client';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -10,6 +23,16 @@ import { AppealService } from './appeal.service';
 import { DisputesService } from './disputes.service';
 import { DisputeDecisionDto } from './dto/dispute-decision.dto';
 import { OpenAppealDto } from './dto/open-appeal.dto';
+import { CreateDisputeMessageDto } from './dto/create-dispute-message.dto';
+
+const ALLOWED_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'application/pdf',
+  'video/mp4',
+]);
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 @ApiTags('disputes')
 @ApiBearerAuth()
@@ -77,5 +100,49 @@ export class DisputesController {
       return this.appeals.decideAppeal(id, user, dto.outcome);
     }
     return this.disputes.decide(dispute, dto.outcome, user);
+  }
+
+  // ----------------------------------------------------------
+  // MESSAGING (#dispute-messaging)
+  // ----------------------------------------------------------
+
+  @Get(':id/messages')
+  @ApiOperation({ summary: 'List messages for a dispute (participants and admins only)' })
+  @ApiResponse({ status: 200, description: 'Messages listed oldest-first' })
+  @ApiResponse({ status: 403, description: 'Not a party to this dispute' })
+  @ApiResponse({ status: 404, description: 'Dispute not found' })
+  listMessages(@Param('id') id: string, @CurrentUser() user: any) {
+    return this.disputes.listMessages(id, user);
+  }
+
+  @Post(':id/messages')
+  @UseInterceptors(FileInterceptor('attachment', { storage: memoryStorage() }))
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @ApiOperation({
+    summary:
+      'Post a message to a dispute (participants and admins only). ' +
+      'Optionally attach a file (JPEG/PNG/GIF/PDF/MP4, ≤ 10 MB) as multipart/form-data.',
+  })
+  @ApiResponse({ status: 201, description: 'Message created' })
+  @ApiResponse({ status: 400, description: 'Invalid file type or size' })
+  @ApiResponse({ status: 403, description: 'Not a party to this dispute' })
+  @ApiResponse({ status: 404, description: 'Dispute not found' })
+  async createMessage(
+    @Param('id') id: string,
+    @Body() dto: CreateDisputeMessageDto,
+    @CurrentUser() user: any,
+    @UploadedFile() file?: Express.Multer.File,
+  ) {
+    if (file) {
+      if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+        throw new BadRequestException(
+          `File type "${file.mimetype}" is not allowed. Accepted: JPEG, PNG, GIF, PDF, MP4.`,
+        );
+      }
+      if (file.size > MAX_FILE_SIZE) {
+        throw new BadRequestException('File size exceeds the 10 MB limit.');
+      }
+    }
+    return this.disputes.createMessage(id, user, dto.body, file);
   }
 }
