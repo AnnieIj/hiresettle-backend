@@ -178,6 +178,9 @@ model User {
   discordWebhookUrl String?     // Discord incoming-webhook URL for notification alerts (#278)
   teamsWebhookUrl String?       // Microsoft Teams incoming-webhook URL for notification alerts (#391)
   batchWindowSeconds Int        @default(60) // notification batching window in seconds (#279)
+  // Company tax profile used for invoice VAT / reverse charge (#506)
+  taxCountry     String?        // ISO 3166-1 alpha-2 country of establishment, e.g. "DE"
+  taxId          String?        // VAT / tax registration number, normalised (uppercase, no spaces), e.g. "DE123456789"
   // Email change flow (#356): pending new address + HMAC token cleared after confirmation
   pendingEmail               String?
   emailChangeToken           String?  @unique

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: hiresettle-backend
+description: Reference Helm chart for the HireSettle NestJS API (recruiter fee escrow on Stellar)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.23.0-0"
+keywords:
+  - hiresettle
+  - nestjs
+  - stellar
+home: https://github.com/TrustHire/hiresettle-backend
+sources:
+  - https://github.com/TrustHire/hiresettle-backend

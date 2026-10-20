@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Put,
   Delete,
   Body,
   Param,
@@ -21,8 +22,8 @@ import {
   ApiBody,
 } from "@nestjs/swagger";
 import { Response } from "express";
-import { IsEnum, IsString, IsNotEmpty } from "class-validator";
-import { ApiProperty } from "@nestjs/swagger";
+import { IsEnum, IsString, IsNotEmpty, IsOptional, Matches, MaxLength } from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { BillingService } from "./billing.service";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
@@ -42,6 +43,23 @@ class AddCompanyMemberDto {
   @ApiProperty({ enum: CompanyRole, example: CompanyRole.MEMBER })
   @IsEnum(CompanyRole)
   companyRole: CompanyRole;
+}
+
+class UpdateTaxProfileDto {
+  @ApiProperty({ example: "DE", description: "ISO 3166-1 alpha-2 country of establishment" })
+  @IsString()
+  @Matches(/^[A-Za-z]{2}$/, { message: "taxCountry must be a 2-letter ISO country code" })
+  taxCountry: string;
+
+  @ApiPropertyOptional({
+    example: "DE123456789",
+    description: "VAT / tax registration number. EU numbers must include the country prefix. Send null to clear.",
+    nullable: true,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  taxId?: string | null;
 }
 
 @ApiTags("companies")
@@ -71,10 +89,16 @@ export class BillingController {
     required: false,
     description: "End date (ISO format)",
   })
+  @ApiQuery({
+    name: "fiat",
+    required: false,
+    description: "3-letter ISO 4217 currency for fiat-equivalent totals (e.g. USD). Omit for token amounts only.",
+  })
   getBillingSummary(
     @CurrentUser() user: any,
     @Query("from") from?: string,
     @Query("to") to?: string,
+    @Query("fiat") fiat?: string,
   ) {
     const fromDate = from ? new Date(from) : undefined;
     const toDate = to ? new Date(to) : undefined;
@@ -97,11 +121,17 @@ export class BillingController {
     required: false,
     description: "End date (ISO format)",
   })
+  @ApiQuery({
+    name: "fiat",
+    required: false,
+    description: "3-letter ISO 4217 currency to include fiat-equivalent columns (e.g. USD)",
+  })
   async exportBillingCsv(
     @CurrentUser() user: any,
     @Res() res: Response,
     @Query("from") from?: string,
     @Query("to") to?: string,
+    @Query("fiat") fiat?: string,
   ) {
     const fromDate = from ? new Date(from) : undefined;
     const toDate = to ? new Date(to) : undefined;
@@ -109,6 +139,7 @@ export class BillingController {
       user,
       fromDate,
       toDate,
+      parseFiat(fiat),
     );
 
     res.setHeader("Content-Type", "text/csv");
@@ -132,7 +163,9 @@ export class BillingController {
   @Get("billing/invoices/:id.pdf")
   @UseGuards(CompanyRoleGuard)
   @CompanyRoles(CompanyRole.OWNER, CompanyRole.BILLING)
-  @ApiOperation({ summary: "Generate invoice PDF for a billing period" })
+  @ApiOperation({
+    summary: "Generate invoice PDF for a billing period, with VAT / reverse charge from the tax profile",
+  })
   async getInvoicePdf(
     @CurrentUser() user: any,
     @Param("id") invoiceId: string,
@@ -153,6 +186,28 @@ export class BillingController {
       `attachment; filename="invoice-${invoiceId}.pdf"`,
     );
     res.status(HttpStatus.OK).send(invoice);
+  }
+
+  @Get("tax-profile")
+  @UseGuards(CompanyRoleGuard)
+  @CompanyRoles(CompanyRole.OWNER, CompanyRole.BILLING)
+  @ApiOperation({ summary: "Get the company's tax country and VAT ID (OWNER and BILLING roles)" })
+  getTaxProfile(@CurrentUser("id") companyId: string) {
+    return this.billingService.getTaxProfile(companyId);
+  }
+
+  @Put("tax-profile")
+  @UseGuards(CompanyRoleGuard)
+  @CompanyRoles(CompanyRole.OWNER, CompanyRole.BILLING)
+  @ApiOperation({
+    summary: "Set the company's tax country and VAT ID used for invoice VAT (OWNER and BILLING roles)",
+  })
+  @ApiBody({ type: UpdateTaxProfileDto })
+  updateTaxProfile(
+    @CurrentUser("id") companyId: string,
+    @Body() dto: UpdateTaxProfileDto,
+  ) {
+    return this.billingService.updateTaxProfile(companyId, dto);
   }
 
   /**
@@ -287,4 +342,16 @@ export class BillingExportController {
   getUsage(@CurrentUser("companyId") companyId: string) {
     return this.billingService.getCompanyUsage(companyId || "unknown");
   }
+}
+
+/** Validate and normalize an optional fiat currency query param. */
+function parseFiat(fiat?: string): string | undefined {
+  if (!fiat) return undefined;
+  const normalized = fiat.trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(normalized)) {
+    throw new BadRequestException(
+      "fiat must be a 3-letter ISO 4217 currency code (e.g. USD)",
+    );
+  }
+  return normalized;
 }

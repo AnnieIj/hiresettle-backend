@@ -1,0 +1,49 @@
+name: Helm chart
+
+# Lints the reference chart (#510) and validates every rendered manifest
+# against the Kubernetes OpenAPI schemas for each values file in ci/.
+on:
+  pull_request:
+    paths:
+      - 'helm/**'
+      - '.github/workflows/helm.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'helm/**'
+
+jobs:
+  lint-and-validate:
+    runs-on: ubuntu-latest
+    env:
+      CHART: helm/hiresettle-backend
+      KUBECONFORM_VERSION: v0.6.7
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+
+      - name: Lint, render and validate
+        run: |
+          set -euo pipefail
+          for values in "$CHART"/ci/*.yaml; do
+            echo "::group::$values"
+            helm lint "$CHART" --strict -f "$values"
+            helm template ci "$CHART" -f "$values" > rendered.yaml
+            kubeconform -strict -summary -kubernetes-version 1.29.0 rendered.yaml
+            # Probes and the HPA must always be wired up.
+            grep -q 'path: /healthz/live' rendered.yaml
+            grep -q 'path: /healthz/ready' rendered.yaml
+            echo "::endgroup::"
+          done
