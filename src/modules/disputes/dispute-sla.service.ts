@@ -1,10 +1,18 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { DisputeSlaStatus, DisputeStage, NotificationType, UserRole } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ACTIVE_DISPUTE_STATUSES } from './dispute.constants';
+
+/** Runtime-tunable SLA settings per stage (#503). */
+const STAGE_SYSTEM_CONFIG_KEYS: Record<DisputeStage, string> = {
+  [DisputeStage.ASSIGNMENT]: 'disputes.slaAssignmentHours',
+  [DisputeStage.ARBITER_REVIEW]: 'disputes.slaReviewHours',
+  [DisputeStage.APPEAL_REVIEW]: 'disputes.slaAppealHours',
+};
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -29,6 +37,7 @@ export class DisputeSlaService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
+    @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
     this.stageHours = {
       [DisputeStage.ASSIGNMENT]: Number(this.config.get('DISPUTE_SLA_ASSIGNMENT_HOURS', 24)),
@@ -39,9 +48,16 @@ export class DisputeSlaService {
     this.evidenceWarningHours = Number(this.config.get('DISPUTE_EVIDENCE_WARNING_HOURS', 12));
   }
 
+  /** SLA hours for a stage; admin overrides apply without a restart (#503). */
+  hoursFor(stage: DisputeStage): number {
+    return this.systemConfig
+      ? this.systemConfig.getNumber(STAGE_SYSTEM_CONFIG_KEYS[stage])
+      : this.stageHours[stage];
+  }
+
   /** Response deadline for a stage entered at `from`. */
   deadlineFor(stage: DisputeStage, from: Date = new Date()): Date {
-    return new Date(from.getTime() + this.stageHours[stage] * HOUR_MS);
+    return new Date(from.getTime() + this.hoursFor(stage) * HOUR_MS);
   }
 
   /** Fields to write when a dispute enters a new stage — resets the SLA clock. */
