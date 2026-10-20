@@ -1,37 +1,27 @@
-import { Args, Int, Query, Resolver } from "@nestjs/graphql";
-import { EngagementStatus, Prisma } from "@prisma/client";
+import { Args, Context, Int, Query, Resolver } from "@nestjs/graphql";
+import { EngagementStatus } from "@prisma/client";
 import { PrismaService } from "../common/prisma/prisma.service";
 import {
   GraphqlEngagement,
   GraphqlMilestone,
   GraphqlUser,
 } from "./graphql.types";
+import {
+  GraphqlContext,
+  serializeMilestone,
+  userSelect,
+} from "./loaders/graphql-loaders";
 
-const userSelect = {
-  id: true,
-  stellarAddress: true,
-  name: true,
-  company: true,
-  role: true,
-  verifiedAt: true,
-} satisfies Prisma.UserSelect;
-
-const engagementInclude = {
-  company: { select: userSelect },
-  recruiter: { select: userSelect },
-  arbiter: { select: userSelect },
-  milestones: { orderBy: { milestoneIndex: "asc" as const } },
-} satisfies Prisma.EngagementInclude;
-
+/**
+ * Scalar engagement columns only — company/recruiter/arbiter/milestones are
+ * resolved through request-scoped DataLoaders (#515), see
+ * EngagementFieldsResolver.
+ */
 function serializeEngagement(engagement: any): GraphqlEngagement {
   return {
     ...engagement,
     totalAmount: engagement.totalAmount.toString(),
     releasedAmount: engagement.releasedAmount.toString(),
-    milestones: engagement.milestones.map((milestone: any) => ({
-      ...milestone,
-      amount: milestone.amount?.toString() ?? null,
-    })),
   } as GraphqlEngagement;
 }
 
@@ -50,11 +40,9 @@ export class GraphqlResolver {
   @Query(() => GraphqlUser, { nullable: true })
   user(
     @Args("stellarAddress") stellarAddress: string,
+    @Context() ctx: GraphqlContext,
   ): Promise<GraphqlUser | null> {
-    return this.prisma.user.findUnique({
-      where: { stellarAddress },
-      select: userSelect,
-    });
+    return ctx.loaders.users.load(stellarAddress);
   }
 
   @Query(() => [GraphqlEngagement])
@@ -66,13 +54,12 @@ export class GraphqlResolver {
     @Args("take", { type: () => Int, nullable: true, defaultValue: 20 })
     take = 20,
   ): Promise<GraphqlEngagement[]> {
-    const engagements = (await this.prisma.engagement.findMany({
+    const engagements = await this.prisma.engagement.findMany({
       where: status ? { status } : undefined,
-      include: engagementInclude,
       orderBy: { createdAt: "desc" },
       skip,
       take,
-    })) as unknown as GraphqlEngagement[];
+    });
     return engagements.map(serializeEngagement);
   }
 
@@ -80,7 +67,6 @@ export class GraphqlResolver {
   async engagement(@Args("id") id: string): Promise<GraphqlEngagement | null> {
     const engagement = await this.prisma.engagement.findUnique({
       where: { id },
-      include: engagementInclude,
     });
     if (!engagement) return null;
     return serializeEngagement(engagement);
@@ -94,9 +80,6 @@ export class GraphqlResolver {
       where: engagementId ? { engagementId } : undefined,
       orderBy: [{ engagementId: "asc" }, { milestoneIndex: "asc" }],
     });
-    return milestones.map((milestone) => ({
-      ...milestone,
-      amount: milestone.amount?.toString() ?? null,
-    })) as unknown as GraphqlMilestone[];
+    return milestones.map(serializeMilestone);
   }
 }

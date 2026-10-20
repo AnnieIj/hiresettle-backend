@@ -22,6 +22,28 @@ export class DisputesController {
     private readonly appeals: AppealService,
   ) {}
 
+  @Get('arbiter-payouts')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ARBITER, UserRole.ADMIN)
+  @ApiOperation({
+    summary:
+      'Billing report of arbiter fee payouts recorded on dispute resolution (#500). ' +
+      'Arbiters see their own payouts; admins see every payout.',
+  })
+  @ApiResponse({ status: 200, description: 'Arbiter payout records, newest first' })
+  async listArbiterPayouts(@CurrentUser() user: any) {
+    const where = user.role === UserRole.ADMIN ? {} : { arbiterId: user.id };
+    const payouts = await this.prisma.arbiterPayout.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      include: { arbiter: { select: { id: true, name: true, email: true } } },
+    });
+    return {
+      payouts: payouts.map((p) => ({ ...p, amount: p.amount.toString() })),
+      totalAmount: payouts.reduce((sum, p) => sum + p.amount, 0n).toString(),
+    };
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Dispute detail, including SLA response deadline and appeal window' })
   @ApiResponse({ status: 200, description: 'Dispute detail' })

@@ -42,7 +42,10 @@ export interface DisputeActor {
  */
 @Injectable()
 export class DisputesService {
-  private readonly envAppealWindowHours: number;
+  private readonly appealWindowHours: number;
+  private readonly evidenceWindowHours: number;
+  private readonly arbiterFeeType: 'FLAT' | 'PERCENT';
+  private readonly arbiterFeeValue: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -53,14 +56,49 @@ export class DisputesService {
     private readonly sla: DisputeSlaService,
     @Optional() private readonly systemConfig?: SystemConfigService,
   ) {
-    this.envAppealWindowHours = Number(this.config.get('DISPUTE_APPEAL_WINDOW_HOURS', 72));
+    this.appealWindowHours = Number(this.config.get('DISPUTE_APPEAL_WINDOW_HOURS', 72));
+    // Window during which either party may submit dispute evidence (#499).
+    this.evidenceWindowHours = Number(this.config.get('DISPUTE_EVIDENCE_WINDOW_HOURS', 72));
+    // Arbiter fee charged on dispute resolution (#500): a FLAT amount in
+    // stroops, or a PERCENT of the milestone amount.
+    this.arbiterFeeType =
+      String(this.config.get('ARBITER_FEE_TYPE', 'PERCENT')).toUpperCase() === 'FLAT' ? 'FLAT' : 'PERCENT';
+    this.arbiterFeeValue = Number(this.config.get('ARBITER_FEE_VALUE', 5));
   }
 
-  /** Appeal window; admin overrides apply without a restart (#503). */
-  private get appealWindowHours(): number {
-    return this.systemConfig
-      ? this.systemConfig.getNumber('disputes.appealWindowHours')
-      : this.envAppealWindowHours;
+  /** Arbiter fee owed for a settled dispute, in stroops (#500). */
+  computeArbiterFee(milestoneAmount: bigint): bigint {
+    if (this.arbiterFeeValue <= 0) return 0n;
+    if (this.arbiterFeeType === 'FLAT') {
+      return BigInt(Math.round(this.arbiterFeeValue));
+    }
+    // PERCENT: keep 2 decimal places of precision (basis points) so e.g.
+    // 2.5% is not truncated to 2%.
+    const basisPoints = BigInt(Math.round(this.arbiterFeeValue * 100));
+    return (milestoneAmount * basisPoints) / 10_000n;
+  }
+
+  /**
+   * Records the arbiter's fee for a settled dispute (#500). Idempotent per
+   * dispute (one payout row each), so a retried settlement never double-pays.
+   */
+  async recordArbiterPayout(dispute: Pick<Dispute, 'id' | 'arbiterId'>, milestoneAmount: bigint) {
+    if (!dispute.arbiterId) return null;
+    const amount = this.computeArbiterFee(milestoneAmount);
+    if (amount <= 0n) return null;
+
+    const existing = await this.prisma.arbiterPayout.findUnique({ where: { disputeId: dispute.id } });
+    if (existing) return existing;
+
+    return this.prisma.arbiterPayout.create({
+      data: {
+        disputeId: dispute.id,
+        arbiterId: dispute.arbiterId,
+        feeType: this.arbiterFeeType,
+        feeValue: this.arbiterFeeValue,
+        amount,
+      },
+    });
   }
 
   // ----------------------------------------------------------
@@ -84,6 +122,7 @@ export class DisputesService {
     });
     if (!milestone) throw new NotFoundException(`Milestone ${milestoneId} not found`);
 
+    const now = new Date();
     const dispute = await this.prisma.dispute.create({
       data: {
         engagementId: milestone.engagementId,
@@ -92,7 +131,9 @@ export class DisputesService {
         reason: opts.reason ?? milestone.disputeReason,
         status: DisputeStatus.OPEN,
         fundsLocked: true,
-        ...this.sla.stageFields(DisputeStage.ASSIGNMENT),
+        // Evidence window opens the moment the dispute is raised (#499).
+        evidenceDeadline: new Date(now.getTime() + this.evidenceWindowHours * HOUR_MS),
+        ...this.sla.stageFields(DisputeStage.ASSIGNMENT, now),
       },
     });
 
@@ -133,7 +174,36 @@ export class DisputesService {
         deadline: dispute.appealDeadline,
         isOpen: this.isAppealWindowOpen(dispute, now),
       },
+      evidenceWindow: {
+        deadline: dispute.evidenceDeadline,
+        isOpen: this.isEvidenceWindowOpen(dispute, now),
+      },
     };
+  }
+
+  /**
+   * Whether evidence may still be uploaded for this dispute (#499). Once the
+   * dispute is no longer active (decided/closed) or the deadline has passed,
+   * no further evidence is accepted.
+   */
+  isEvidenceWindowOpen(
+    dispute: Pick<Dispute, 'status' | 'evidenceDeadline'>,
+    now: Date = new Date(),
+  ): boolean {
+    if (!ACTIVE_DISPUTE_STATUSES.includes(dispute.status)) return false;
+    if (!dispute.evidenceDeadline) return true;
+    return now <= dispute.evidenceDeadline;
+  }
+
+  /**
+   * Returns the active (non-closed) dispute for a milestone, if any, so
+   * callers (e.g. evidence upload) can enforce the evidence window.
+   */
+  async findActiveForMilestone(milestoneId: string) {
+    return this.prisma.dispute.findFirst({
+      where: { milestoneId, status: { not: DisputeStatus.CLOSED } },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   isAppealWindowOpen(
@@ -282,6 +352,9 @@ export class DisputesService {
       where: { id: disputeId },
       data: { fundsLocked: false, fundsReleasedAt: now },
     });
+
+    // Deduct and record the arbiter's fee for having decided this dispute (#500).
+    await this.recordArbiterPayout(dispute, amount);
 
     await this.notifyParties(
       dispute.engagementId,

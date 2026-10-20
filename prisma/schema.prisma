@@ -65,6 +65,7 @@ enum NotificationType {
   DISPUTE_SLA_OVERDUE
   DISPUTE_APPEALED
   DISPUTE_APPEAL_DECIDED
+  DISPUTE_EVIDENCE_WINDOW_CLOSING
   COMMENT_ADDED
   WATCHER_ADDED
   UNMATCHED_PAYMENT_ALERT
@@ -211,6 +212,9 @@ model User {
   discordWebhookUrl String?     // Discord incoming-webhook URL for notification alerts (#278)
   teamsWebhookUrl String?       // Microsoft Teams incoming-webhook URL for notification alerts (#391)
   batchWindowSeconds Int        @default(60) // notification batching window in seconds (#279)
+  // Company tax profile used for invoice VAT / reverse charge (#506)
+  taxCountry     String?        // ISO 3166-1 alpha-2 country of establishment, e.g. "DE"
+  taxId          String?        // VAT / tax registration number, normalised (uppercase, no spaces), e.g. "DE123456789"
   // Email change flow (#356): pending new address + HMAC token cleared after confirmation
   pendingEmail               String?
   emailChangeToken           String?  @unique
@@ -250,6 +254,7 @@ model User {
   milestoneApprovals   MilestoneApproval[]
   recruiterReviews     RecruiterReview[]        @relation("RecruiterReviews")
   reviewerReviews      RecruiterReview[]        @relation("ReviewerReviews")
+  portfolioEntries     RecruiterPortfolioEntry[] @relation("RecruiterPortfolio")
   kycDocuments         KycDocument[]
   teamInvites          TeamInvite[]             @relation("TeamInvites")
   savedFilters         SavedFilter[]
@@ -257,9 +262,11 @@ model User {
   recruiterFavorites   FavoriteRecruiter[]      @relation("RecruiterFavorites")
   companyMembers       CompanyMember[]          @relation("CompanyOwner")
   memberOfCompanies    CompanyMember[]          @relation("MemberUser")
+  escrowSignerSets     CompanyEscrowSignerSet[] @relation("CompanyEscrowSignerSets")
   recoveryCodes        RecoveryCode[]
   trustedDevices       TrustedDevice[]
   arbitratedDisputes   Dispute[]                @relation("DisputeArbiter")
+  arbiterPayouts       ArbiterPayout[]
   arbiterRecusals      ArbiterRecusal[]
   milestoneComments    MilestoneComment[]
   creditLedgerEntries  CreditLedger[]           @relation("CompanyCreditLedger")
@@ -267,6 +274,9 @@ model User {
   @@index([role, deactivatedAt])
   @@index([deletedAt, anonymizedAt]) // Used by PiiAnonymizationSchedulerService
   @@index([kycStatus])
+  @@index([email])                   // #474 — admin user search by email
+  @@index([stellarAddress])          // #474 — admin user search by Stellar address
+  @@index([company])                 // #474 — admin user search by company name
   @@map("users")
 }
 
@@ -951,12 +961,15 @@ model FavoriteRecruiter {
 // Existing single-user company accounts are implicitly OWNER; a CompanyMember row is
 // only required when additional team members are added.
 model CompanyMember {
-  id          String      @id @default(uuid())
-  companyId   String
-  memberId    String
-  companyRole CompanyRole @default(MEMBER)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  id            String      @id @default(uuid())
+  companyId     String
+  memberId      String
+  companyRole   CompanyRole @default(MEMBER)
+  // Issue #479: optional cap on how much this member may fund across engagements.
+  // Stored in the smallest currency unit (e.g. cents). NULL means no cap.
+  spendingLimit Int?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   company User @relation("CompanyOwner", fields: [companyId], references: [id], onDelete: Cascade)
   member  User @relation("MemberUser",   fields: [memberId],  references: [id], onDelete: Cascade)
@@ -1052,6 +1065,8 @@ model Dispute {
   fundsLocked             Boolean          @default(true)
   fundsReleasedAt         DateTime?
   isFinal                 Boolean          @default(false)
+  evidenceDeadline        DateTime?        // deadline for either party to upload evidence (#499)
+  evidenceDeadlineWarnedAt DateTime?       // set once both parties were warned the evidence window is closing
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
@@ -1065,7 +1080,25 @@ model Dispute {
   @@index([arbiterId, status])
   @@index([status, slaStatus, responseDeadline])
   @@index([status, appealDeadline])
+  @@index([status, evidenceDeadline])
   @@map("disputes")
+}
+
+// Records the arbiter fee deducted on dispute resolution (#500). One row per
+// settled dispute; the fee is held back from the amount released on-chain.
+model ArbiterPayout {
+  id         String   @id @default(uuid())
+  disputeId  String   @unique
+  arbiterId  String
+  feeType    String   // "FLAT" or "PERCENT", snapshot of config at resolution time
+  feeValue   Decimal  // snapshot of the configured flat amount or percent
+  amount     BigInt   // computed payout amount, in stroops
+  createdAt  DateTime @default(now())
+
+  arbiter User @relation(fields: [arbiterId], references: [id])
+
+  @@index([arbiterId])
+  @@map("arbiter_payouts")
 }
 
 // At most one appeal per dispute — enforced by @unique on disputeId (#382).
@@ -1144,104 +1177,89 @@ model UnmatchedPayment {
 }
 
 // ============================================================
-// MILESTONE WORKFLOW (#376–#379) — restored, tables already exist
+// MULTISIG COMPANY ESCROW ACCOUNTS (#495)
 // ============================================================
 
-model MilestoneProofVersion {
-  id               String             @id @default(uuid())
-  milestoneId      String
-  versionNumber    Int
-  proofUrl         String?
-  content          String?
-  proofHash        String?
-  submittedById    String?
-  submittedAt      DateTime           @default(now())
-  status           ProofVersionStatus @default(SUBMITTED)
-  reviewedById     String?
-  reviewedAt       DateTime?
-  rejectionReason  String?
-  // Review SLA bookkeeping (#377) — per version, so a resubmission restarts the clock
-  reminder50SentAt DateTime?
-  reminder90SentAt DateTime?
-  slaExpiredAt     DateTime?
-
-  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
-
-  @@unique([milestoneId, versionNumber])
-  @@index([status, submittedAt])
-  @@map("milestone_proof_versions")
+enum MultisigTxStatus {
+  PENDING    // collecting signatures, below threshold
+  SUBMITTED  // threshold met and submitted to Horizon
+  FAILED     // submission to Horizon failed
 }
 
-model MilestonePartialRelease {
-  id                  String                 @id @default(uuid())
-  milestoneId         String
-  engagementId        String
-  proposedById        String
-  releaseAmount       BigInt                 // stroops paid to the recruiter
-  remainderAmount     BigInt                 // stroops left after the release
-  remainderAction     PartialRemainderAction
-  reason              String?
-  status              PartialReleaseStatus   @default(PROPOSED)
-  companyApproverId   String?
-  companyApprovedAt   DateTime?
-  recruiterApproverId String?
-  recruiterApprovedAt DateTime?
-  txHash              String?
-  executedAt          DateTime?
-  failureReason       String?
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
+// One signer set + required threshold per company escrow account. A company
+// may rotate its signer set over time, so signerSets is 1:N off the owning
+// company (User) rather than embedding a fixed list on the user record.
+model CompanyEscrowSignerSet {
+  id              String   @id @default(uuid())
+  companyId       String
+  escrowAccountId String   // the Stellar account address this signer set guards
+  threshold       Int      // number of distinct signatures required before submission
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
-  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  company  User                      @relation("CompanyEscrowSignerSets", fields: [companyId], references: [id], onDelete: Cascade)
+  signers  CompanyEscrowSigner[]
+  pendingTxs MultisigPendingTransaction[]
 
-  @@index([milestoneId, status])
-  @@index([engagementId])
-  @@map("milestone_partial_releases")
+  @@unique([companyId, escrowAccountId])
+  @@index([companyId])
+  @@map("company_escrow_signer_sets")
 }
 
-model MilestoneComment {
+// A single authorized signer (public key + optional linked user) within a
+// signer set.
+model CompanyEscrowSigner {
+  id            String   @id @default(uuid())
+  signerSetId   String
+  publicKey     String   // Stellar public key (G...) authorized to sign
+  userId        String?  // optional link to a platform user who controls this key
+  createdAt     DateTime @default(now())
+
+  signerSet CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@unique([signerSetId, publicKey])
+  @@index([signerSetId])
+  @@map("company_escrow_signers")
+}
+
+// A transaction awaiting enough signatures before it is submitted to
+// Horizon. `unsignedXdr` is the base envelope every signer signs a copy of;
+// `signedCount` is a denormalized cache of distinct signers collected so
+// far, enforced via the unique constraint on MultisigSignature.
+model MultisigPendingTransaction {
+  id              String           @id @default(uuid())
+  signerSetId     String
+  unsignedXdr     String           @db.Text
+  description     String?          // human-readable context, e.g. "Release milestone payment"
+  status          MultisigTxStatus @default(PENDING)
+  submittedTxHash String?
+  errorMessage    String?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  signerSet  CompanyEscrowSignerSet @relation(fields: [signerSetId], references: [id], onDelete: Cascade)
+  signatures MultisigSignature[]
+
+  @@index([signerSetId])
+  @@index([status])
+  @@map("multisig_pending_transactions")
+}
+
+// One row per signer per pending transaction. The unique constraint on
+// [pendingTxId, signerId] is what makes a duplicate submission from the
+// same signer a no-op rather than double-counting toward the threshold.
+model MultisigSignature {
   id           String   @id @default(uuid())
-  milestoneId  String
-  engagementId String
-  authorId     String
-  body         String
+  pendingTxId  String
+  signerId     String
+  signedXdr    String   @db.Text // the signer's own signed copy of the envelope, from which we extract their signature
   createdAt    DateTime @default(now())
 
-  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
-  author    User      @relation(fields: [authorId], references: [id])
+  pendingTx MultisigPendingTransaction @relation(fields: [pendingTxId], references: [id], onDelete: Cascade)
+  signer    CompanyEscrowSigner        @relation(fields: [signerId], references: [id], onDelete: Cascade)
 
-  @@index([milestoneId, createdAt])
-  @@index([engagementId, createdAt])
-  @@map("milestone_comments")
-}
-
-// ============================================================
-// PREPAID CREDITS (#507)
-// ============================================================
-
-// Append-only ledger of a company's prepaid platform credits. Rows are never
-// updated or deleted (enforced by a database trigger); corrections are new
-// REVERSAL / ADJUSTMENT entries. `sequence` is gap-free per company and
-// `balanceAfter` snapshots the running balance, so the history is auditable
-// and the current balance is the latest row's balanceAfter.
-model CreditLedger {
-  id             String                @id @default(uuid())
-  companyId      String                // users.id of the COMPANY account
-  sequence       Int                   // 1, 2, 3… per company; unique → serialises concurrent writers
-  type           CreditLedgerEntryType
-  amount         BigInt                // signed, minor units: > 0 adds credit, < 0 consumes it
-  balanceAfter   BigInt                // running balance after this entry (never negative)
-  description    String?
-  reference      String?               // external reference, e.g. a platform fee / charge id
-  idempotencyKey String?               // same key → same entry, never applied twice
-  createdById    String?               // admin or system actor; null for automatic fee deductions
-  createdAt      DateTime              @default(now())
-
-  company User @relation("CompanyCreditLedger", fields: [companyId], references: [id], onDelete: Restrict)
-
-  @@unique([companyId, sequence])
-  @@unique([companyId, idempotencyKey])
-  @@index([companyId, createdAt])
-  @@index([reference])
-  @@map("credit_ledger")
+  @@unique([pendingTxId, signerId])
+  @@index([pendingTxId])
+  @@map("multisig_signatures")
 }

@@ -1,0 +1,21 @@
+HireSettle API deployed as {{ include "hiresettle-backend.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+Probes:
+  liveness   {{ .Values.probes.liveness.path }}
+  readiness  {{ .Values.probes.readiness.path }}
+
+Port-forward and check:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "hiresettle-backend.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://localhost:8080/healthz/ready
+  curl http://localhost:8080/.well-known/jwks.json
+{{- if not .Values.secrets.existingSecret }}
+
+WARNING: secrets.existingSecret is empty, so the chart rendered a Secret from
+values. Prefer an externally managed Secret in production.
+{{- end }}
+{{- if and .Values.jwtSigningKeys.enabled (not .Values.jwtSigningKeys.existingSecret) }}
+
+WARNING: jwtSigningKeys.existingSecret is empty. Create a Secret named
+{{ include "hiresettle-backend.jwtKeysSecretName" . }} with a "{{ .Values.jwtSigningKeys.key }}" entry
+before the pods can start (see helm/hiresettle-backend/README.md).
+{{- end }}

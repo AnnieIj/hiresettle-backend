@@ -48,6 +48,7 @@ const makePrisma = () => ({
   milestone: { findUnique: jest.fn(), update: jest.fn() },
   engagement: { findUnique: jest.fn().mockResolvedValue(engagement) },
   refund: { upsert: jest.fn() },
+  arbiterPayout: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() },
 });
 
 async function build(appealWindowHours = 72) {
@@ -89,7 +90,7 @@ describe('DisputesService', () => {
 
       const result = await service.openForMilestone('ms-0');
 
-      expect(sla.stageFields).toHaveBeenCalledWith(DisputeStage.ASSIGNMENT);
+      expect(sla.stageFields).toHaveBeenCalledWith(DisputeStage.ASSIGNMENT, expect.any(Date));
       expect(prisma.dispute.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
           engagementId: 'ENG-001',
@@ -288,6 +289,150 @@ describe('DisputesService', () => {
 
       expect(prisma.dispute.update).toHaveBeenCalledWith({ where: { id: 'dispute-1' }, data: { status: DisputeStatus.RESOLVED } });
       expect(prisma.milestone.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('evidence window (#499)', () => {
+    it('is open for an active dispute with no deadline set', async () => {
+      const { service } = await build();
+      expect(service.isEvidenceWindowOpen({ status: DisputeStatus.OPEN, evidenceDeadline: null })).toBe(true);
+    });
+
+    it('is open for an active dispute before its evidence deadline', async () => {
+      const { service } = await build();
+      const now = new Date('2026-10-01T00:00:00.000Z');
+      expect(
+        service.isEvidenceWindowOpen(
+          { status: DisputeStatus.OPEN, evidenceDeadline: new Date(now.getTime() + HOUR) },
+          now,
+        ),
+      ).toBe(true);
+    });
+
+    it('is closed once the evidence deadline has passed', async () => {
+      const { service } = await build();
+      const now = new Date('2026-10-01T00:00:00.000Z');
+      expect(
+        service.isEvidenceWindowOpen(
+          { status: DisputeStatus.OPEN, evidenceDeadline: new Date(now.getTime() - HOUR) },
+          now,
+        ),
+      ).toBe(false);
+    });
+
+    it('is closed once the dispute is no longer active', async () => {
+      const { service } = await build();
+      expect(
+        service.isEvidenceWindowOpen({ status: DisputeStatus.CLOSED, evidenceDeadline: new Date(Date.now() + HOUR) }),
+      ).toBe(false);
+    });
+
+    it('openForMilestone sets the evidence deadline from config', async () => {
+      const { service, prisma, arbiters } = await build();
+      prisma.dispute.findFirst.mockResolvedValue(null);
+      prisma.milestone.findUnique.mockResolvedValue({ engagementId: 'ENG-001', disputeReason: 'No show' });
+      prisma.dispute.create.mockResolvedValue({ id: 'dispute-1' });
+      arbiters.autoAssign.mockResolvedValue(null);
+
+      await service.openForMilestone('ms-0');
+
+      const { evidenceDeadline } = prisma.dispute.create.mock.calls[0][0].data;
+      expect(evidenceDeadline).toBeInstanceOf(Date);
+      expect(evidenceDeadline.getTime()).toBeGreaterThan(Date.now());
+    });
+
+    it('findActiveForMilestone returns the latest non-closed dispute', async () => {
+      const { service, prisma } = await build();
+      prisma.dispute.findFirst.mockResolvedValue({ id: 'dispute-1' });
+
+      const result = await service.findActiveForMilestone('ms-0');
+
+      expect(prisma.dispute.findFirst).toHaveBeenCalledWith({
+        where: { milestoneId: 'ms-0', status: { not: DisputeStatus.CLOSED } },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result).toEqual({ id: 'dispute-1' });
+    });
+  });
+
+  describe('arbiter fee and payout (#500)', () => {
+    it('computes a PERCENT fee (the default) from the milestone amount', async () => {
+      const { service } = await build();
+      // Default config: ARBITER_FEE_TYPE=PERCENT, ARBITER_FEE_VALUE=5
+      expect(service.computeArbiterFee(1000n)).toBe(50n);
+    });
+
+    it('computes a FLAT fee when configured', async () => {
+      const prisma = makePrisma();
+      const stellar = { resolveMilestoneDispute: jest.fn() };
+      const notifications = { notifyUserById: jest.fn() };
+      const arbiters = { autoAssign: jest.fn() };
+      const sla = { stageFields: jest.fn(), completionStatus: jest.fn() };
+      const config = {
+        get: jest.fn((key: string, fallback: unknown) => {
+          if (key === 'ARBITER_FEE_TYPE') return 'FLAT';
+          if (key === 'ARBITER_FEE_VALUE') return 25;
+          return fallback;
+        }),
+      };
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          DisputesService,
+          { provide: PrismaService, useValue: prisma },
+          { provide: StellarService, useValue: stellar },
+          { provide: NotificationsService, useValue: notifications },
+          { provide: ConfigService, useValue: config },
+          { provide: ArbiterAssignmentService, useValue: arbiters },
+          { provide: DisputeSlaService, useValue: sla },
+        ],
+      }).compile();
+      const service = module.get(DisputesService);
+
+      // A flat fee doesn't scale with the milestone amount.
+      expect(service.computeArbiterFee(1_000_000n)).toBe(25n);
+      expect(service.computeArbiterFee(1n)).toBe(25n);
+    });
+
+    it('records a payout for the assigned arbiter and does not double-record it', async () => {
+      const { service, prisma } = await build();
+      prisma.arbiterPayout.findUnique.mockResolvedValueOnce(null);
+      prisma.arbiterPayout.create.mockResolvedValue({ id: 'payout-1' });
+
+      const first = await service.recordArbiterPayout({ id: 'dispute-1', arbiterId: 'arb-1' }, 1000n);
+      expect(prisma.arbiterPayout.create).toHaveBeenCalledWith({
+        data: { disputeId: 'dispute-1', arbiterId: 'arb-1', feeType: 'PERCENT', feeValue: 5, amount: 50n },
+      });
+      expect(first).toEqual({ id: 'payout-1' });
+
+      prisma.arbiterPayout.findUnique.mockResolvedValueOnce({ id: 'payout-1' });
+      const second = await service.recordArbiterPayout({ id: 'dispute-1', arbiterId: 'arb-1' }, 1000n);
+      expect(prisma.arbiterPayout.create).toHaveBeenCalledTimes(1);
+      expect(second).toEqual({ id: 'payout-1' });
+    });
+
+    it('does not record a payout when no arbiter was assigned', async () => {
+      const { service, prisma } = await build();
+      await service.recordArbiterPayout({ id: 'dispute-1', arbiterId: null }, 1000n);
+      expect(prisma.arbiterPayout.create).not.toHaveBeenCalled();
+    });
+
+    it('settle() records the arbiter payout for the dispute', async () => {
+      const { service, prisma } = await build();
+      prisma.dispute.updateMany.mockResolvedValue({ count: 1 });
+      prisma.dispute.findUniqueOrThrow.mockResolvedValue({
+        ...reviewDispute(),
+        status: DisputeStatus.CLOSED,
+        outcome: DisputeOutcome.RELEASE,
+        isFinal: true,
+        milestone: { id: 'ms-0', milestoneIndex: 0, amount: 1000n },
+      });
+      prisma.arbiterPayout.findUnique.mockResolvedValue(null);
+
+      await service.settle('dispute-1');
+
+      expect(prisma.arbiterPayout.create).toHaveBeenCalledWith({
+        data: { disputeId: 'dispute-1', arbiterId: 'arb-1', feeType: 'PERCENT', feeValue: 5, amount: 50n },
+      });
     });
   });
 });

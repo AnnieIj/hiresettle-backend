@@ -1,9 +1,17 @@
-import { BadRequestException, Injectable, Logger } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { User, UserRole } from "@prisma/client";
 import { StellarService } from "../../common/stellar/stellar.service";
 import { ExchangeRateService } from "../../common/exchange-rates/exchange-rate.service";
-import { CreditLedgerService } from "./credit-ledger.service";
+import { InvoiceTaxService } from "./tax/invoice-tax.service";
+import { renderInvoicePdf } from "./tax/invoice-pdf";
+import {
+  EU_COUNTRIES,
+  isPlausibleVatId,
+  normalizeCountry,
+  normalizeTaxId,
+  vatPrefix,
+} from "./tax/invoice-tax.calculator";
 
 /** Round a fiat amount to 2 decimal places. */
 function roundFiat(value: number): number {
@@ -34,84 +42,95 @@ export class BillingService {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly exchangeRates: ExchangeRateService,
-    private readonly credits: CreditLedgerService,
+    private readonly invoiceTax: InvoiceTaxService,
   ) {}
-
-  private static createPdfBuffer(lines: string[]) {
-    const content = lines.join("\n");
-    const stream = Buffer.from(content).toString("latin1");
-    const objects: string[] = ["%PDF-1.4"];
-    const offsets: number[] = [0];
-    const contentStart = 0;
-    const contentLength = Buffer.byteLength(stream, "latin1");
-    objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj");
-    objects.push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj");
-    objects.push(
-      "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj",
-    );
-    objects.push(
-      `4 0 obj\n<< /Length ${contentLength} >>\nstream\n${stream}\nendstream\nendobj`,
-    );
-    objects.push(
-      "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj",
-    );
-
-    let position = 0;
-    const body: string[] = [];
-    for (let i = 0; i < objects.length; i++) {
-      const obj = objects[i];
-      const offset = position;
-      offsets.push(offset);
-      body.push(`${i} 0 obj\n${obj.replace(/^\d+ 0 obj\n/, "")}\nendobj\n`);
-      position += Buffer.byteLength(body[body.length - 1], "latin1");
-    }
-
-    const xrefOffset = Buffer.byteLength(body.join(""), "latin1");
-    const xref = `xref\n0 ${objects.length} \n0000000000 65535 f \n${offsets
-      .slice(1)
-      .map((offset) => `${offset.toString().padStart(10, "0")} 00000 n \n`)
-      .join("")}`;
-    const trailer = `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-    return Buffer.from(
-      `%PDF-1.4\n${body.join("")}\n${xref}\n${trailer}`,
-      "latin1",
-    );
-  }
 
   generateInvoiceNumber(id: string | number) {
     const seed = Number(String(id).replace(/[^0-9]/g, "") || "1");
     return `INV-${String(seed + 1000).padStart(7, "0")}`;
   }
 
-  generateInvoicePdf(
-    companyUser: User,
+  /**
+   * Invoice for a billing period with VAT computed from the company's tax
+   * profile (#506): domestic VAT, EU reverse charge or outside-scope, with
+   * the matching statutory notice printed on the PDF.
+   */
+  async generateInvoicePdf(
+    companyUser: Pick<User, "id">,
     invoiceId: string | number,
     fromDate?: Date,
     toDate?: Date,
-    fiat?: string,
+  ): Promise<Buffer> {
+    // The JWT user only carries id/email/role, so load the full profile.
+    const company = await this.prisma.user.findUnique({
+      where: { id: companyUser.id },
+    });
+    if (!company) throw new NotFoundException("Company not found");
+
+    const billing = await this.getBillingSummary(company, fromDate, toDate);
+    const lines = billing.engagementBreakdown.map((item) => ({
+      description: `${item.jobTitle} (${item.engagementId})`,
+      amount: BigInt(item.totalEscrowed),
+    }));
+    const tax = this.invoiceTax.compute(
+      { country: company.taxCountry, taxId: company.taxId },
+      lines,
+    );
+    const seller = this.invoiceTax.seller();
+
+    return renderInvoicePdf({
+      invoiceNumber: this.generateInvoiceNumber(invoiceId),
+      issuedAt: new Date(),
+      periodFrom: billing.fromDate,
+      periodTo: billing.toDate,
+      seller: { name: seller.name, country: tax.seller.country, taxId: tax.seller.taxId },
+      customer: {
+        name: company.company ?? company.name ?? "N/A",
+        email: company.email,
+        country: tax.customer.country,
+        taxId: tax.customer.taxId,
+      },
+      lines,
+      tax,
+      unit: "stroops",
+    });
+  }
+
+  async getTaxProfile(companyId: string) {
+    const company = await this.prisma.user.findUnique({
+      where: { id: companyId },
+      select: { taxCountry: true, taxId: true },
+    });
+    if (!company) throw new NotFoundException("Company not found");
+    return company;
+  }
+
+  /**
+   * Store the company's country and VAT number (#506). EU VAT numbers must
+   * carry the country's prefix so cross-border invoices can apply the
+   * reverse charge.
+   */
+  async updateTaxProfile(
+    companyId: string,
+    dto: { taxCountry: string; taxId?: string | null },
   ) {
-    const billingData = this.getBillingSummary(companyUser, fromDate, toDate);
-    return billingData.then(({ summary, engagementBreakdown }) => {
-      const invoiceNumber = this.generateInvoiceNumber(invoiceId);
-      const itemLines = engagementBreakdown.length
-        ? engagementBreakdown.map(
-            (item) =>
-              `${item.jobTitle} (${item.engagementId})  ${item.totalEscrowed}`,
-          )
-        : ["No billable engagements in this period"];
-      const lines = [
-        "BT /F1 18 Tf 72 760 Td (HireSettle Invoice) Tj ET",
-        `BT /F1 12 Tf 72 736 Td (Invoice #: ${invoiceNumber}) Tj ET`,
-        `BT /F1 12 Tf 72 720 Td (Company: ${companyUser.company ?? companyUser.name ?? "N/A"}) Tj ET`,
-        `BT /F1 12 Tf 72 704 Td (Contact: ${companyUser.email ?? "N/A"}) Tj ET`,
-        ...itemLines.map(
-          (line, index) =>
-            `BT /F1 10 Tf 72 ${688 - index * 16} Td (${line}) Tj ET`,
-        ),
-        `BT /F1 12 Tf 72 120 Td (Total Escrowed: ${summary.totalEscrowed}) Tj ET`,
-        `BT /F1 12 Tf 72 104 Td (Total Released: ${summary.totalReleased}) Tj ET`,
-      ];
-      return BillingService.createPdfBuffer(lines);
+    const taxCountry = normalizeCountry(dto.taxCountry);
+    if (!taxCountry) {
+      throw new BadRequestException("taxCountry must be an ISO 3166-1 alpha-2 code, e.g. DE");
+    }
+    const taxId = normalizeTaxId(dto.taxId);
+    if (taxId && !isPlausibleVatId(taxId, taxCountry)) {
+      throw new BadRequestException(
+        EU_COUNTRIES.has(taxCountry)
+          ? `taxId must be a ${taxCountry} VAT number starting with "${vatPrefix(taxCountry)}"`
+          : "taxId must be 4-20 letters or digits",
+      );
+    }
+
+    return this.prisma.user.update({
+      where: { id: companyId },
+      data: { taxCountry, taxId },
+      select: { taxCountry: true, taxId: true },
     });
   }
 
