@@ -9,6 +9,10 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { AuthService } from './auth.service';
+import { TwoFactorService } from './two-factor.service';
+import { SessionService } from './session.service';
+import { WalletAuthService } from './wallet-auth.service';
+import { OAuthService } from './oauth.service';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { StellarService } from '../../common/stellar/stellar.service';
 import { SecurityEventsService } from '../../common/security-events/security-events.service';
@@ -149,6 +153,11 @@ describe('AuthService', () => {
         { provide: SecurityEventsService, useValue: makeMockSecurityEvents() },
         { provide: PasswordPolicyService, useValue: makeMockPasswordPolicy() },
         { provide: HibpService, useValue: makeMockHibp() },
+        // Sub-services extracted in #444 — provide real instances so delegation works
+        TwoFactorService,
+        SessionService,
+        { provide: WalletAuthService, useValue: { generateNonce: jest.fn(), consumeNonce: jest.fn(), walletLogin: jest.fn() } },
+        { provide: OAuthService, useValue: { loginWithGoogle: jest.fn(), getGoogleAuthUrl: jest.fn(), exchangeGoogleCode: jest.fn() } },
       ],
     }).compile();
 
@@ -214,6 +223,10 @@ describe('AuthService', () => {
           { provide: SecurityEventsService, useValue: makeMockSecurityEvents() },
           { provide: PasswordPolicyService, useValue: makeMockPasswordPolicy() },
           { provide: HibpService, useValue: makeMockHibp() },
+          TwoFactorService,
+          SessionService,
+          { provide: WalletAuthService, useValue: { generateNonce: jest.fn(), consumeNonce: jest.fn(), walletLogin: jest.fn() } },
+          { provide: OAuthService, useValue: { loginWithGoogle: jest.fn(), getGoogleAuthUrl: jest.fn(), exchangeGoogleCode: jest.fn() } },
         ],
       }).compile();
       const svc2 = module2.get<AuthService>(AuthService);
@@ -227,14 +240,14 @@ describe('AuthService', () => {
     });
 
     it('throws ConflictException on duplicate email/address', async () => {
-      const prismaError = new Prisma.PrismaClientKnownRequestError(
-        'Unique constraint failed',
-        {
-          code: 'P2002',
-          clientVersion: '5.0.0',
-          meta: {},
-        },
-      );
+      // Simulate a Prisma P2002 without using the enum constructor (not available in Jest mock env)
+      const prismaError = Object.assign(new Error('Unique constraint failed'), {
+        code: 'P2002',
+        clientVersion: '5.0.0',
+        meta: {},
+        name: 'PrismaClientKnownRequestError',
+      });
+      Object.setPrototypeOf(prismaError, Prisma.PrismaClientKnownRequestError?.prototype ?? Error.prototype);
       mockPrisma.user.create.mockRejectedValue(prismaError);
 
       await expect(service.register(dto as any)).rejects.toThrow(
@@ -515,9 +528,13 @@ describe('AuthService', () => {
   // ── generateNonce ──────────────────────────────────────────────────────────
 
   describe('generateNonce()', () => {
-    it('returns a nonce string prefixed with hiresettle:', () => {
+    it('delegates to WalletAuthService and returns its result', () => {
+      const walletAuth = (service as any).walletAuth as { generateNonce: jest.Mock };
+      walletAuth.generateNonce.mockReturnValue('hiresettle:GABC:12345:abc');
+
       const nonce = service.generateNonce('GABC');
-      expect(nonce).toMatch(/^hiresettle:GABC:/);
+      expect(nonce).toBe('hiresettle:GABC:12345:abc');
+      expect(walletAuth.generateNonce).toHaveBeenCalledWith('GABC');
     });
   });
 
@@ -629,7 +646,7 @@ describe('AuthService', () => {
       mockPrisma.refreshToken.findUnique.mockResolvedValue(session);
       mockPrisma.refreshToken.update.mockResolvedValue({ ...session, revokedAt: new Date() });
 
-      jest.spyOn(service as any, 'hashRefreshToken').mockReturnValue('abc123');
+      jest.spyOn((service as any).sessionService, 'hashRefreshToken').mockReturnValue('abc123');
 
       const result = await service.revokeSession('rt-1', 'user-1', 'current-token');
 
@@ -682,7 +699,7 @@ describe('AuthService', () => {
       mockPrisma.user.findUnique.mockResolvedValue(user);
       mockPrisma.user.update.mockResolvedValue({ ...user, totpEnabled: true });
 
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
 
       // $transaction is called inside createRecoveryCodes — return array results
       mockPrisma.$transaction.mockResolvedValue([{ count: 0 }, { count: 10 }]);
@@ -722,7 +739,7 @@ describe('AuthService', () => {
     it('throws UnauthorizedException with invalid TOTP code', async () => {
       const user = makeUser({ totpSecret: 'JBSWY3DPEHPK3PXP', totpEnabled: false });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(false);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(false);
 
       await expect(service.enableTotp('user-1', '000000')).rejects.toThrow(
         UnauthorizedException,
@@ -738,7 +755,7 @@ describe('AuthService', () => {
       mockPrisma.user.findUnique.mockResolvedValue(user);
       mockPrisma.user.update.mockResolvedValue({ ...user, totpEnabled: false, totpSecret: null });
 
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
 
       const result = await service.disableTotp('user-1', '123456');
 
@@ -761,7 +778,7 @@ describe('AuthService', () => {
     it('throws UnauthorizedException with invalid TOTP code', async () => {
       const user = makeUser({ totpSecret: 'JBSWY3DPEHPK3PXP', totpEnabled: true });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(false);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(false);
 
       await expect(service.disableTotp('user-1', '000000')).rejects.toThrow(
         UnauthorizedException,
@@ -799,7 +816,7 @@ describe('AuthService', () => {
       mockPrisma.refreshToken.create.mockResolvedValue({});
 
       // Spy on the private consumeRecoveryCode to return true
-      jest.spyOn(service as any, 'consumeRecoveryCode').mockResolvedValue(true);
+      jest.spyOn((service as any).twoFactor, 'consumeRecoveryCode').mockResolvedValue(true);
 
       const result = await service.login({
         email: 'alice@example.com',
@@ -807,7 +824,7 @@ describe('AuthService', () => {
         recoveryCode: 'AABB11CCDD-EEFF223344',
       } as any);
 
-      expect((service as any).consumeRecoveryCode).toHaveBeenCalledWith(
+      expect((service as any).twoFactor.consumeRecoveryCode).toHaveBeenCalledWith(
         user2fa.id,
         'AABB11CCDD-EEFF223344',
       );
@@ -819,7 +836,7 @@ describe('AuthService', () => {
       mockPrisma.user.findUnique.mockResolvedValue(user2fa);
       mockPrisma.user.update.mockResolvedValue(user2fa);
 
-      jest.spyOn(service as any, 'consumeRecoveryCode').mockResolvedValue(false);
+      jest.spyOn((service as any).twoFactor, 'consumeRecoveryCode').mockResolvedValue(false);
 
       await expect(
         service.login({
@@ -846,7 +863,7 @@ describe('AuthService', () => {
     it('returns 10 fresh codes when TOTP is valid', async () => {
       const user = makeUser({ totpEnabled: true, totpSecret: 'JBSWY3DPEHPK3PXP' });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
       mockPrisma.$transaction.mockResolvedValue([{ count: 10 }, { count: 10 }]);
 
       const result = await service.regenerateRecoveryCodes('user-1', '123456');
@@ -860,7 +877,7 @@ describe('AuthService', () => {
     it('all generated codes are unique', async () => {
       const user = makeUser({ totpEnabled: true, totpSecret: 'JBSWY3DPEHPK3PXP' });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
       mockPrisma.$transaction.mockResolvedValue([{ count: 0 }, { count: 10 }]);
 
       const result = await service.regenerateRecoveryCodes('user-1', '123456');
@@ -880,7 +897,7 @@ describe('AuthService', () => {
     it('throws UnauthorizedException when TOTP code is invalid', async () => {
       const user = makeUser({ totpEnabled: true, totpSecret: 'JBSWY3DPEHPK3PXP' });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(false);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(false);
 
       await expect(
         service.regenerateRecoveryCodes('user-1', '000000'),
@@ -898,7 +915,7 @@ describe('AuthService', () => {
     it('calls $transaction to delete old codes and insert new ones', async () => {
       const user = makeUser({ totpEnabled: true, totpSecret: 'JBSWY3DPEHPK3PXP' });
       mockPrisma.user.findUnique.mockResolvedValue(user);
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
       mockPrisma.$transaction.mockResolvedValue([{ count: 5 }, { count: 10 }]);
 
       await service.regenerateRecoveryCodes('user-1', '123456');
@@ -915,7 +932,7 @@ describe('AuthService', () => {
       mockPrisma.recoveryCode.findFirst.mockResolvedValue(record);
       mockPrisma.recoveryCode.update.mockResolvedValue({ ...record, usedAt: new Date() });
 
-      const result = await (service as any).consumeRecoveryCode('user-1', 'AABB11CCDD-EEFF223344');
+      const result = await (service as any).twoFactor.consumeRecoveryCode('user-1', 'AABB11CCDD-EEFF223344');
 
       expect(mockPrisma.recoveryCode.update).toHaveBeenCalledWith({
         where: { id: 'rc-1' },
@@ -927,7 +944,7 @@ describe('AuthService', () => {
     it('returns false when no matching unused code exists', async () => {
       mockPrisma.recoveryCode.findFirst.mockResolvedValue(null);
 
-      const result = await (service as any).consumeRecoveryCode('user-1', 'BADCODE');
+      const result = await (service as any).twoFactor.consumeRecoveryCode('user-1', 'BADCODE');
 
       expect(result).toBe(false);
       expect(mockPrisma.recoveryCode.update).not.toHaveBeenCalled();
@@ -937,7 +954,7 @@ describe('AuthService', () => {
       mockPrisma.recoveryCode.findFirst.mockResolvedValue(null);
 
       // Call with lowercase code
-      await (service as any).consumeRecoveryCode('user-1', 'aabb11ccdd-eeff223344');
+      await (service as any).twoFactor.consumeRecoveryCode('user-1', 'aabb11ccdd-eeff223344');
 
       // findFirst should be called with the SHA-256 hash of the uppercased code
       const { createHash } = await import('crypto');
@@ -959,7 +976,7 @@ describe('AuthService', () => {
     it('stores a hashed token and returns the raw token', async () => {
       mockPrisma.trustedDevice.create.mockResolvedValue({ id: 'td-1' });
 
-      const token = await service.issueTrustedDeviceToken('user-1', 'Mozilla/5.0');
+      const token = await (service as any).twoFactor.issueTrustedDeviceToken('user-1', 'Mozilla/5.0');
 
       expect(typeof token).toBe('string');
       expect(token).toHaveLength(64); // 32 random bytes → 64 hex chars
@@ -985,7 +1002,7 @@ describe('AuthService', () => {
     it('sets expiresAt 30 days in the future by default', async () => {
       mockPrisma.trustedDevice.create.mockResolvedValue({ id: 'td-1' });
       const before = Date.now();
-      await service.issueTrustedDeviceToken('user-1');
+      await (service as any).twoFactor.issueTrustedDeviceToken('user-1');
       const after = Date.now();
 
       const expiresAt: Date = (mockPrisma.trustedDevice.create.mock.calls[0][0] as any).data.expiresAt;
@@ -997,7 +1014,7 @@ describe('AuthService', () => {
     it('truncates userAgent to 120 chars for the name field', async () => {
       mockPrisma.trustedDevice.create.mockResolvedValue({ id: 'td-1' });
       const longAgent = 'A'.repeat(200);
-      await service.issueTrustedDeviceToken('user-1', longAgent);
+      await (service as any).twoFactor.issueTrustedDeviceToken('user-1', longAgent);
       const name = (mockPrisma.trustedDevice.create.mock.calls[0][0] as any).data.name;
       expect(name).toHaveLength(120);
     });
@@ -1020,7 +1037,7 @@ describe('AuthService', () => {
       mockPrisma.trustedDevice.findUnique.mockResolvedValue(device);
       mockPrisma.trustedDevice.update.mockResolvedValue(device);
 
-      const result = await service.verifyTrustedDeviceToken('user-1', 'raw-token');
+      const result = await (service as any).twoFactor.verifyTrustedDeviceToken('user-1', 'raw-token');
       expect(result).toBe(true);
       expect(mockPrisma.trustedDevice.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1032,28 +1049,28 @@ describe('AuthService', () => {
 
     it('returns false when token not found', async () => {
       mockPrisma.trustedDevice.findUnique.mockResolvedValue(null);
-      const result = await service.verifyTrustedDeviceToken('user-1', 'bad-token');
+      const result = await (service as any).twoFactor.verifyTrustedDeviceToken('user-1', 'bad-token');
       expect(result).toBe(false);
     });
 
     it('returns false when device belongs to a different user', async () => {
       const device = makeDevice({ userId: 'user-2' });
       mockPrisma.trustedDevice.findUnique.mockResolvedValue(device);
-      const result = await service.verifyTrustedDeviceToken('user-1', 'raw-token');
+      const result = await (service as any).twoFactor.verifyTrustedDeviceToken('user-1', 'raw-token');
       expect(result).toBe(false);
     });
 
     it('returns false when device is revoked', async () => {
       const device = makeDevice({ revokedAt: new Date() });
       mockPrisma.trustedDevice.findUnique.mockResolvedValue(device);
-      const result = await service.verifyTrustedDeviceToken('user-1', 'raw-token');
+      const result = await (service as any).twoFactor.verifyTrustedDeviceToken('user-1', 'raw-token');
       expect(result).toBe(false);
     });
 
     it('returns false when device is expired', async () => {
       const device = makeDevice({ expiresAt: new Date(Date.now() - 1000) });
       mockPrisma.trustedDevice.findUnique.mockResolvedValue(device);
-      const result = await service.verifyTrustedDeviceToken('user-1', 'raw-token');
+      const result = await (service as any).twoFactor.verifyTrustedDeviceToken('user-1', 'raw-token');
       expect(result).toBe(false);
     });
   });
@@ -1089,7 +1106,7 @@ describe('AuthService', () => {
       mockPrisma.user.update.mockResolvedValue(user2fa);
       mockPrisma.refreshToken.create.mockResolvedValue({});
 
-      jest.spyOn(service, 'verifyTrustedDeviceToken').mockResolvedValue(true);
+      jest.spyOn((service as any).twoFactor, 'verifyTrustedDeviceToken').mockResolvedValue(true);
 
       const result = await service.login({
         email: 'alice@example.com',
@@ -1097,7 +1114,7 @@ describe('AuthService', () => {
         trustedDeviceToken: 'some-valid-token',
       } as any);
 
-      expect(service.verifyTrustedDeviceToken).toHaveBeenCalledWith(
+      expect((service as any).twoFactor.verifyTrustedDeviceToken).toHaveBeenCalledWith(
         user2fa.id,
         'some-valid-token',
       );
@@ -1115,8 +1132,8 @@ describe('AuthService', () => {
       mockPrisma.refreshToken.create.mockResolvedValue({});
       mockPrisma.trustedDevice.create.mockResolvedValue({ id: 'td-1' });
 
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
-      jest.spyOn(service, 'issueTrustedDeviceToken').mockResolvedValue('new-device-token');
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'issueTrustedDeviceToken').mockResolvedValue('new-device-token');
 
       const result = await service.login({
         email: 'alice@example.com',
@@ -1125,7 +1142,7 @@ describe('AuthService', () => {
         trustDevice: true,
       } as any);
 
-      expect(service.issueTrustedDeviceToken).toHaveBeenCalledWith(
+      expect((service as any).twoFactor.issueTrustedDeviceToken).toHaveBeenCalledWith(
         user2fa.id,
         undefined,
       );
@@ -1145,8 +1162,8 @@ describe('AuthService', () => {
       mockPrisma.user.update.mockResolvedValue(user2fa);
       mockPrisma.refreshToken.create.mockResolvedValue({});
 
-      jest.spyOn(service as any, 'verifyTotpCode').mockReturnValue(true);
-      jest.spyOn(service, 'issueTrustedDeviceToken').mockResolvedValue('token');
+      jest.spyOn((service as any).twoFactor, 'verifyTotpCode').mockReturnValue(true);
+      jest.spyOn((service as any).twoFactor, 'issueTrustedDeviceToken').mockResolvedValue('token');
 
       const result = await service.login({
         email: 'alice@example.com',
@@ -1154,7 +1171,7 @@ describe('AuthService', () => {
         totpCode: '123456',
       } as any);
 
-      expect(service.issueTrustedDeviceToken).not.toHaveBeenCalled();
+      expect((service as any).twoFactor.issueTrustedDeviceToken).not.toHaveBeenCalled();
       expect(result).not.toHaveProperty('trustedDeviceToken');
     });
   });
@@ -1347,6 +1364,10 @@ describe('AuthService', () => {
           { provide: SecurityEventsService, useValue: makeMockSecurityEvents() },
           { provide: PasswordPolicyService, useValue: makeMockPasswordPolicy() },
           { provide: HibpService, useValue: hibpMock },
+          TwoFactorService,
+          SessionService,
+          { provide: WalletAuthService, useValue: { generateNonce: jest.fn(), consumeNonce: jest.fn(), walletLogin: jest.fn() } },
+          { provide: OAuthService, useValue: { loginWithGoogle: jest.fn(), getGoogleAuthUrl: jest.fn(), exchangeGoogleCode: jest.fn() } },
         ],
       }).compile();
 
