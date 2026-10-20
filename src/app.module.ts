@@ -109,6 +109,7 @@ export function shouldSkipThrottle(req: { path?: string; url?: string; originalU
     EmailModule,
     GraphqlModule,
     FeatureFlagsModule,
+    WellKnownModule,
   ],
   providers: [
     {

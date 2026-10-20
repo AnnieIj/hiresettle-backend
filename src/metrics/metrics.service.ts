@@ -1,62 +1,62 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable } from "@nestjs/common";
 import {
   Counter,
   Histogram,
   Gauge,
   Registry,
   collectDefaultMetrics,
-} from 'prom-client';
+} from "prom-client";
 
 @Injectable()
 export class MetricsService {
   readonly registry = new Registry();
 
   readonly httpRequestsTotal = new Counter({
-    name: 'http_requests_total',
-    help: 'Total number of HTTP requests',
-    labelNames: ['method', 'route', 'status'],
+    name: "http_requests_total",
+    help: "Total number of HTTP requests",
+    labelNames: ["method", "route", "status"],
     registers: [this.registry],
   });
 
   readonly httpRequestDuration = new Histogram({
-    name: 'http_request_duration_seconds',
-    help: 'HTTP request duration in seconds',
-    labelNames: ['method', 'route', 'status'],
+    name: "http_request_duration_seconds",
+    help: "HTTP request duration in seconds",
+    labelNames: ["method", "route", "status"],
     buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
     registers: [this.registry],
   });
 
   readonly dbQueryDuration = new Histogram({
-    name: 'db_query_duration_seconds',
-    help: 'Database query duration in seconds',
-    labelNames: ['model', 'action'],
+    name: "db_query_duration_seconds",
+    help: "Database query duration in seconds",
+    labelNames: ["model", "action"],
     buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1],
     registers: [this.registry],
   });
 
   readonly sseActiveConnections = new Gauge({
-    name: 'sse_active_connections',
-    help: 'Number of active Server-Sent Events connections',
+    name: "sse_active_connections",
+    help: "Number of active Server-Sent Events connections",
     registers: [this.registry],
   });
 
   readonly stellarCircuitBreakerState = new Gauge({
-    name: 'stellar_circuit_breaker_state',
-    help: 'Stellar RPC circuit breaker state (0=closed, 1=open, 2=half-open)',
+    name: "stellar_circuit_breaker_state",
+    help: "Stellar RPC circuit breaker state (0=closed, 1=open, 2=half-open)",
     registers: [this.registry],
   });
 
   readonly stellarRpcCallsTotal = new Counter({
-    name: 'stellar_rpc_calls_total',
-    help: 'Total Stellar RPC calls by result',
-    labelNames: ['result'],
+    name: "stellar_rpc_calls_total",
+    help: "Total Stellar RPC calls by result",
+    labelNames: ["result"],
     registers: [this.registry],
   });
 
   readonly stellarRpcDuration = new Histogram({
-    name: 'stellar_rpc_duration_seconds',
-    help: 'Stellar RPC call duration in seconds',
-    labelNames: ['operation'],
+    name: "stellar_rpc_duration_seconds",
+    help: "Stellar RPC call duration in seconds",
+    labelNames: ["operation"],
     buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
     registers: [this.registry],
   });
@@ -66,20 +66,20 @@ export class MetricsService {
   // ----------------------------------------------------------
 
   readonly reconciliationCheckedTotal = new Gauge({
-    name: 'reconciliation_checked_total',
-    help: 'Total active engagements checked in the last reconciliation run',
+    name: "reconciliation_checked_total",
+    help: "Total active engagements checked in the last reconciliation run",
     registers: [this.registry],
   });
 
   readonly reconciliationMismatchedTotal = new Gauge({
-    name: 'reconciliation_mismatched_total',
-    help: 'Total engagements with on-chain/off-chain drift in the last reconciliation run',
+    name: "reconciliation_mismatched_total",
+    help: "Total engagements with on-chain/off-chain drift in the last reconciliation run",
     registers: [this.registry],
   });
 
   readonly reconciliationLastRunTimestamp = new Gauge({
-    name: 'reconciliation_last_run_timestamp_seconds',
-    help: 'Unix timestamp of the most recent reconciliation run',
+    name: "reconciliation_last_run_timestamp_seconds",
+    help: "Unix timestamp of the most recent reconciliation run",
     registers: [this.registry],
   });
 
@@ -88,14 +88,41 @@ export class MetricsService {
   // ----------------------------------------------------------
 
   readonly unmatchedPaymentsPending = new Gauge({
-    name: 'unmatched_payments_pending_total',
-    help: 'Number of incoming Stellar payments currently pending admin review',
+    name: "unmatched_payments_pending_total",
+    help: "Number of incoming Stellar payments currently pending admin review",
     registers: [this.registry],
   });
 
   readonly unmatchedPaymentsTotal = new Counter({
-    name: 'unmatched_payments_detected_total',
-    help: 'Cumulative incoming Stellar payments that could not be matched to an engagement',
+    name: "unmatched_payments_detected_total",
+    help: "Cumulative incoming Stellar payments that could not be matched to an engagement",
+    registers: [this.registry],
+  });
+
+  // ----------------------------------------------------------
+  // Webhook delivery metrics
+  // ----------------------------------------------------------
+
+  readonly webhookDeliveriesTotal = new Counter({
+    name: "webhook_deliveries_total",
+    help: "Total webhook delivery attempts",
+    labelNames: ["status", "event"],
+    registers: [this.registry],
+  });
+
+  readonly webhookDeliveryDuration = new Histogram({
+    name: "webhook_delivery_duration_seconds",
+    help: "Webhook delivery duration in seconds",
+    labelNames: ["status", "event"],
+    buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10],
+    registers: [this.registry],
+  });
+
+  readonly webhookDeliveryAttempts = new Histogram({
+    name: "webhook_delivery_attempts",
+    help: "Number of attempts needed for webhook delivery",
+    labelNames: ["status", "event"],
+    buckets: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     registers: [this.registry],
   });
 
@@ -105,18 +132,38 @@ export class MetricsService {
     this.stellarCircuitBreakerState.set(0);
   }
 
-  recordHttpRequest(method: string, route: string, status: number, durationMs: number) {
+  recordHttpRequest(
+    method: string,
+    route: string,
+    status: number,
+    durationMs: number,
+  ) {
     const labels = { method, route, status: String(status) };
     this.httpRequestsTotal.inc(labels);
     this.httpRequestDuration.observe(labels, durationMs / 1000);
   }
 
   recordDbQuery(model: string, action: string, durationMs: number) {
-    this.dbQueryDuration.observe({ model: model ?? 'unknown', action }, durationMs / 1000);
+    this.dbQueryDuration.observe(
+      { model: model ?? "unknown", action },
+      durationMs / 1000,
+    );
   }
 
   recordStellarRpc(operation: string, durationMs: number) {
     this.stellarRpcDuration.observe({ operation }, durationMs / 1000);
+  }
+
+  recordWebhookDelivery(
+    status: "success" | "failure",
+    event: string,
+    durationMs: number,
+    attempts: number,
+  ) {
+    const labels = { status, event };
+    this.webhookDeliveriesTotal.inc(labels);
+    this.webhookDeliveryDuration.observe(labels, durationMs / 1000);
+    this.webhookDeliveryAttempts.observe(labels, attempts);
   }
 
   async getMetrics(): Promise<string> {

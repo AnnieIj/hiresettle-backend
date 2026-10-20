@@ -19,13 +19,18 @@ export interface WebhookJobData {
   subscriptionId?: string;
   /** HTTP status of the most recent failed attempt, kept for the delivery log (#397). */
   lastResponseCode?: number;
+  /** Timestamp when the job was first created, for latency tracking. */
+  startTime?: number;
 }
 
 @Processor(QUEUE_WEBHOOK)
 export class WebhookProcessor extends WorkerHost {
   private readonly logger = new Logger(WebhookProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly metrics?: MetricsService,
+  ) {
     super();
   }
 
@@ -60,6 +65,17 @@ export class WebhookProcessor extends WorkerHost {
 
     this.logger.log(`Webhook job ${job.id} delivered to ${url}`);
 
+    // Record successful delivery metrics
+    if (this.metrics) {
+      const duration = Date.now() - startTime;
+      this.metrics.recordWebhookDelivery(
+        "success",
+        payload.event,
+        duration,
+        job.attemptsMade + 1,
+      );
+    }
+
     // Successful subscription deliveries are logged so companies can audit them (#397).
     if (job.data.subscriptionId) {
       await this.recordDelivery(job, {
@@ -78,10 +94,23 @@ export class WebhookProcessor extends WorkerHost {
       return;
     }
 
-    const { url } = job.data;
+    const { url, payload } = job.data;
+    const startTime = job.data.startTime ?? Date.now();
+
     this.logger.error(
       `Webhook job ${job.id} to ${url} exhausted all ${job.attemptsMade} attempts: ${job.failedReason}`,
     );
+
+    // Record failed delivery metrics
+    if (this.metrics) {
+      const duration = Date.now() - startTime;
+      this.metrics.recordWebhookDelivery(
+        "failure",
+        payload.event,
+        duration,
+        job.attemptsMade,
+      );
+    }
 
     await this.recordDelivery(job, {
       status: "FAILED",
